@@ -1,19 +1,18 @@
-# main.py
+# server.py
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Header, Query
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import List, Optional
+from typing import List, Optional, Generator
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from sqlalchemy import create_engine, Column, Integer, String, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-import secrets
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+import asyncio
 
-# ##############
+# ####################
 # Configuration
-# ##############
+# ####################
 
 DATABASE_URL = "sqlite:///./clipboard.db"
 JWT_SECRET = "supersecretkey"  # In production, use a secure, random key from environment variables
@@ -25,13 +24,13 @@ engine = create_engine(
     DATABASE_URL, connect_args={"check_same_thread": False}  # Needed for SQLite
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+Base = declarative_base()  # Updated import path
 
 # Initialize Passlib for password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Initialize FastAPI
-app = FastAPI()
+# Initialize FastAPI with lifespan
+app = FastAPI(lifespan="on")  # Specify lifespan handling
 
 # #################
 # Database Models
@@ -104,7 +103,7 @@ def decode_token(token: str) -> str:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # Dependency to get DB session
-def get_db():
+def get_db() -> Generator:
     db = SessionLocal()
     try:
         yield db
@@ -120,25 +119,6 @@ def get_current_user(token: Optional[str] = Header(None), db: Session = Depends(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid user")
     return user
-
-# #################
-# Initialize Clipboard
-# #################
-
-def initialize_clipboard(db: Session):
-    clipboard = db.query(Clipboard).first()
-    if not clipboard:
-        initial_text = "Initial Clipboard Content"
-        clipboard = Clipboard(text=initial_text)
-        db.add(clipboard)
-        db.commit()
-
-# Initialize clipboard on startup
-@app.on_event("startup")
-def startup_event():
-    db = SessionLocal()
-    initialize_clipboard(db)
-    db.close()
 
 # #################
 # User Management
@@ -202,7 +182,6 @@ def update_clipboard(
     db.refresh(clipboard_entry)
 
     # Broadcast the updated content to all connected websockets
-    import asyncio
     asyncio.create_task(broadcast_clipboard_update(clipboard_entry.text))
 
     return {"text": clipboard_entry.text}
@@ -274,12 +253,34 @@ async def broadcast_clipboard_update(text: str):
     for conn in to_remove:
         active_connections.remove(conn)
 
+# #################
+# Lifespan Event Handlers
+# #################
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Handles the application lifespan events: startup and shutdown.
+    """
+    # Startup tasks
+    db = SessionLocal()
+    initialize_clipboard(db)
+    db.close()
+    yield
+    # Shutdown tasks (if any)
+    # For example, closing database connections or cleaning up resources
+
+# Assign the lifespan handler to the FastAPI app
+app.router.lifespan_context = lifespan
+
 # ################
 # Run the app! #
 # ################
 
 # To run:
-# uvicorn main:app --reload
+# uvicorn server:app --reload
 #
 # Then test by:
 # 1. Register a new user:
