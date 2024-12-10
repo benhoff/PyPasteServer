@@ -9,6 +9,8 @@ from passlib.context import CryptContext
 from sqlalchemy import create_engine, Column, Integer, String, Text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 import asyncio
+from contextlib import asynccontextmanager
+from pydantic import BaseModel
 
 # ####################
 # Configuration
@@ -28,9 +30,6 @@ Base = declarative_base()  # Updated import path
 
 # Initialize Passlib for password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# Initialize FastAPI with lifespan
-app = FastAPI(lifespan="on")  # Specify lifespan handling
 
 # #################
 # Database Models
@@ -55,8 +54,6 @@ Base.metadata.create_all(bind=engine)
 # #################
 # Pydantic Schemas
 # #################
-
-from pydantic import BaseModel
 
 class UserCreate(BaseModel):
     username: str
@@ -119,6 +116,40 @@ def get_current_user(token: Optional[str] = Header(None), db: Session = Depends(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid user")
     return user
+
+# #################
+# Initialize Clipboard
+# #################
+
+def initialize_clipboard(db: Session):
+    clipboard = db.query(Clipboard).first()
+    if not clipboard:
+        initial_text = "Initial Clipboard Content"
+        clipboard = Clipboard(text=initial_text)
+        db.add(clipboard)
+        db.commit()
+
+# #################
+# Initialize FastAPI with Lifespan
+# #################
+
+app = FastAPI(lifespan="on")  # Specify lifespan handling
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Handles the application lifespan events: startup and shutdown.
+    """
+    # Startup tasks
+    db = SessionLocal()
+    initialize_clipboard(db)
+    db.close()
+    yield
+    # Shutdown tasks (if any)
+    # For example, closing database connections or cleaning up resources
+
+# Assign the lifespan handler to the FastAPI app
+app.router.lifespan_context = lifespan
 
 # #################
 # User Management
@@ -252,72 +283,4 @@ async def broadcast_clipboard_update(text: str):
     # Clean up broken connections
     for conn in to_remove:
         active_connections.remove(conn)
-
-# #################
-# Lifespan Event Handlers
-# #################
-
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Handles the application lifespan events: startup and shutdown.
-    """
-    # Startup tasks
-    db = SessionLocal()
-    initialize_clipboard(db)
-    db.close()
-    yield
-    # Shutdown tasks (if any)
-    # For example, closing database connections or cleaning up resources
-
-# Assign the lifespan handler to the FastAPI app
-app.router.lifespan_context = lifespan
-
-# ################
-# Run the app! #
-# ################
-
-# To run:
-# uvicorn server:app --reload
-#
-# Then test by:
-# 1. Register a new user:
-#    curl -X POST "http://127.0.0.1:8000/register" -H "Content-Type: application/json" -d '{"username": "alice", "password": "secret123"}'
-#
-#    Response:
-#    {
-#      "access_token": "<token>",
-#      "token_type": "bearer"
-#    }
-#
-# 2. Or Login with existing user:
-#    curl -X POST -F "username=alice" -F "password=secret123" http://127.0.0.1:8000/login
-#
-# 3. GET clipboard:
-#    curl http://127.0.0.1:8000/clipboard
-#
-# 4. POST (update) clipboard:
-#    curl -X POST http://127.0.0.1:8000/clipboard \
-#         -H "Authorization: Bearer <your_access_token>" \
-#         -H "Content-Type: application/json" \
-#         -d '{"text": "New clipboard content"}'
-#
-# 5. WebSocket connection with authentication:
-#    Using wscat:
-#    wscat -c "ws://127.0.0.1:8000/ws?token=<your_access_token>"
-#
-#    Or using browser JavaScript:
-#    const token = "<your_access_token>";
-#    const ws = new WebSocket(`ws://127.0.0.1:8000/ws?token=${token}`);
-#
-#    ws.onmessage = (event) => {
-#        const data = JSON.parse(event.data);
-#        if (data.type === "init") {
-#            console.log("Initial Clipboard Content:", data.text);
-#        } else if (data.type === "update") {
-#            console.log("Clipboard Updated:", data.text);
-#        }
-#    };
 
