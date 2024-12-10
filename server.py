@@ -2,12 +2,12 @@
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Header, Query
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import List, Optional, Generator
+from typing import List, Optional, Generator, Dict
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, ForeignKey
+from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 import asyncio
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, EmailStr
@@ -44,11 +44,17 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     email_authenticated = Column(Boolean, default=False, nullable=False)
 
+    clipboard = relationship("Clipboard", uselist=False, back_populates="owner")
+
+
 class Clipboard(Base):
-    __tablename__ = "clipboard"
+    __tablename__ = "clipboards"
 
     id = Column(Integer, primary_key=True, index=True)
     text = Column(Text, nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+
+    owner = relationship("User", back_populates="clipboard")
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
@@ -124,13 +130,14 @@ def get_current_user(token: Optional[str] = Header(None), db: Session = Depends(
 # Initialize Clipboard
 # #################
 
-def initialize_clipboard(db: Session):
-    clipboard = db.query(Clipboard).first()
-    if not clipboard:
-        initial_text = "Initial Clipboard Content"
-        clipboard = Clipboard(text=initial_text)
-        db.add(clipboard)
-        db.commit()
+def initialize_user_clipboard(db: Session, user: User):
+    """
+    Initializes a clipboard for a newly registered user.
+    """
+    clipboard = Clipboard(text="Initial Clipboard Content", owner_id=user.id)
+    db.add(clipboard)
+    db.commit()
+    db.refresh(clipboard)
 
 # #################
 # Initialize FastAPI with Lifespan
@@ -143,13 +150,9 @@ async def lifespan(app: FastAPI):
     """
     Handles the application lifespan events: startup and shutdown.
     """
-    # Startup tasks
-    db = SessionLocal()
-    initialize_clipboard(db)
-    db.close()
+    # Startup tasks (if any)
     yield
     # Shutdown tasks (if any)
-    # For example, closing database connections or cleaning up resources
 
 # Assign the lifespan handler to the FastAPI app
 app.router.lifespan_context = lifespan
@@ -176,6 +179,9 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_user)
 
+    # Initialize user's clipboard
+    initialize_user_clipboard(db, new_user)
+
     access_token_expires = timedelta(minutes=JWT_EXPIRATION_MINUTES)
     access_token = create_access_token(
         data={"sub": new_user.username}, expires_delta=access_token_expires
@@ -201,8 +207,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 # #################
 
 @app.get("/clipboard", response_model=ClipboardResponse)
-def get_clipboard(db: Session = Depends(get_db)):
-    clipboard = db.query(Clipboard).first()
+def get_clipboard(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    clipboard = db.query(Clipboard).filter(Clipboard.owner_id == current_user.id).first()
     if not clipboard:
         raise HTTPException(status_code=404, detail="Clipboard not found")
     return {"text": clipboard.text}
@@ -213,17 +219,18 @@ def update_clipboard(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    clipboard_entry = db.query(Clipboard).first()
+    clipboard_entry = db.query(Clipboard).filter(Clipboard.owner_id == current_user.id).first()
     if not clipboard_entry:
-        clipboard_entry = Clipboard(text=clipboard.text)
+        # This should not happen as clipboard is initialized on registration
+        clipboard_entry = Clipboard(text=clipboard.text, owner_id=current_user.id)
         db.add(clipboard_entry)
     else:
         clipboard_entry.text = clipboard.text
     db.commit()
     db.refresh(clipboard_entry)
 
-    # Broadcast the updated content to all connected websockets
-    asyncio.create_task(broadcast_clipboard_update(clipboard_entry.text))
+    # Broadcast the updated content to all connected websockets for this user
+    asyncio.create_task(broadcast_clipboard_update(current_user.id, clipboard_entry.text))
 
     return {"text": clipboard_entry.text}
 
@@ -231,8 +238,8 @@ def update_clipboard(
 # WebSocket Handler
 # #################
 
-# Store active WebSocket connections
-active_connections: List[WebSocket] = []
+# Store active WebSocket connections per user
+active_connections: Dict[int, List[WebSocket]] = {}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(None)):
@@ -243,7 +250,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
     try:
         username = decode_token(token)
-        # Optional: Verify the user exists in the database
+        # Verify the user exists in the database
         db = SessionLocal()
         user = db.query(User).filter(User.username == username).first()
         db.close()
@@ -256,13 +263,16 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
     # Accept the connection
     await websocket.accept()
+
     # Add to active connections
-    active_connections.append(websocket)
+    if user.id not in active_connections:
+        active_connections[user.id] = []
+    active_connections[user.id].append(websocket)
 
     try:
         # Send initial clipboard content
         db = SessionLocal()
-        clipboard = db.query(Clipboard).first()
+        clipboard = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
         db.close()
         initial_text = clipboard.text if clipboard else ""
         await websocket.send_json({"type": "init", "text": initial_text})
@@ -272,26 +282,33 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             await websocket.receive_text()
 
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
+        active_connections[user.id].remove(websocket)
+        if not active_connections[user.id]:
+            del active_connections[user.id]
     except Exception as e:
-        active_connections.remove(websocket)
+        active_connections[user.id].remove(websocket)
+        if not active_connections[user.id]:
+            del active_connections[user.id]
         # Optionally log the exception
-        print(f"WebSocket error: {e}")
+        print(f"WebSocket error for user {user.username}: {e}")
 
 # ####################
 # Helper Functions
 # ####################
 
-async def broadcast_clipboard_update(text: str):
+async def broadcast_clipboard_update(user_id: int, text: str):
     """
-    Broadcast the updated clipboard content to all connected websocket clients.
+    Broadcast the updated clipboard content to all connected websocket clients of a specific user.
     """
+    connections = active_connections.get(user_id, [])
     to_remove = []
-    for connection in active_connections:
+    for connection in connections:
         try:
             await connection.send_json({"type": "update", "text": text})
         except Exception:
             to_remove.append(connection)
     # Clean up broken connections
     for conn in to_remove:
-        active_connections.remove(conn)
+        connections.remove(conn)
+    if not connections:
+        del active_connections[user_id]
