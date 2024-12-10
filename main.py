@@ -44,7 +44,8 @@ def sigio_handler(signum, frame):
                     return
                 print(f"Clipboard Updated (D-Bus): {data}")
                 CLIPBOARD_HISTORY = data
-                klipper.setClipboardContents(data)
+                if klipper:
+                    klipper.setClipboardContents(data)
         except OSError as e:
             print(f"Error reading /dev/clipboard: {e}", file=sys.stderr)
 
@@ -105,24 +106,25 @@ def main():
     try:
         # Connect to the session bus
         bus = dbus.SessionBus()
+        klipper_present = True
 
         # Attempt to get the Klipper D-Bus object
         try:
             klipper_proxy = bus.get_object("org.kde.klipper", "/klipper")
         except dbus.DBusException:
-            print("Klipper not present. Exiting.")
-            sys.exit(0)
-        
-        # Get the Klipper interface
-        klipper = dbus.Interface(klipper_proxy, dbus_interface="org.kde.klipper.klipper")
-        
-        # Connect to the clipboardHistoryUpdated signal from Klipper D-Bus
-        bus.add_signal_receiver(
-            handler_function=on_clipboard_history_updated,
-            signal_name="clipboardHistoryUpdated",
-            dbus_interface="org.kde.klipper.klipper",
-            path="/klipper"
-        )
+            klipper_present = False
+       
+        if klipper_present:
+            # Get the Klipper interface
+            klipper = dbus.Interface(klipper_proxy, dbus_interface="org.kde.klipper.klipper")
+            
+            # Connect to the clipboardHistoryUpdated signal from Klipper D-Bus
+            bus.add_signal_receiver(
+                handler_function=on_clipboard_history_updated,
+                signal_name="clipboardHistoryUpdated",
+                dbus_interface="org.kde.klipper.klipper",
+                path="/klipper"
+            )
         
         # Set up asynchronous monitoring of /dev/clipboard
         setup_clipboard_device()
