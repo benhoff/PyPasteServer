@@ -27,10 +27,13 @@ def main():
     try:
         # Connect to the session bus
         bus = dbus.SessionBus()
-        
-        # Get the Klipper object
-        klipper_proxy = bus.get_object("org.kde.klipper", "/klipper")
-        
+
+        try:
+            # Get the Klipper object
+            klipper_proxy = bus.get_object("org.kde.klipper", "/klipper")
+        except dbus.DBusException as e:
+            print("clipper not present")
+            sys.exit(0)
         # Get the Klipper interface
         global klipper
         klipper = dbus.Interface(klipper_proxy, dbus_interface="org.kde.klipper.klipper")
