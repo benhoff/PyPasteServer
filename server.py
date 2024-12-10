@@ -6,11 +6,11 @@ from typing import List, Optional, Generator
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
-from sqlalchemy import create_engine, Column, Integer, String, Text
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 import asyncio
 from contextlib import asynccontextmanager
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 # ####################
 # Configuration
@@ -40,7 +40,9 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(150), unique=True, index=True, nullable=False)
+    email = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
+    email_authenticated = Column(Boolean, default=False, nullable=False)
 
 class Clipboard(Base):
     __tablename__ = "clipboard"
@@ -58,6 +60,7 @@ Base.metadata.create_all(bind=engine)
 class UserCreate(BaseModel):
     username: str
     password: str
+    email: EmailStr  # Ensures valid email format
 
 class ClipboardCreate(BaseModel):
     text: str
@@ -133,7 +136,7 @@ def initialize_clipboard(db: Session):
 # Initialize FastAPI with Lifespan
 # #################
 
-app = FastAPI(lifespan="on")  # Specify lifespan handling
+app = FastAPI()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -157,11 +160,18 @@ app.router.lifespan_context = lifespan
 
 @app.post("/register", response_model=Token)
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.username == user.username).first()
+    existing_user = db.query(User).filter(
+        (User.username == user.username) | (User.email == user.email)
+    ).first()
     if existing_user:
-        raise HTTPException(status_code=400, detail="Username already registered")
+        raise HTTPException(status_code=400, detail="Username or email already registered")
     hashed_pw = get_password_hash(user.password)
-    new_user = User(username=user.username, hashed_password=hashed_pw)
+    new_user = User(
+        username=user.username,
+        email=user.email,
+        hashed_password=hashed_pw,
+        email_authenticated=False  # Default to False
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -265,6 +275,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         active_connections.remove(websocket)
     except Exception as e:
         active_connections.remove(websocket)
+        # Optionally log the exception
+        print(f"WebSocket error: {e}")
 
 # ####################
 # Helper Functions
@@ -283,4 +295,3 @@ async def broadcast_clipboard_update(text: str):
     # Clean up broken connections
     for conn in to_remove:
         active_connections.remove(conn)
-
