@@ -6,10 +6,41 @@ import os
 import fcntl
 import signal
 from gi.repository import GLib
+import errno
 
 CLIPBOARD_HISTORY = None
 klipper = None
 clipboard_fd = None
+import errno
+
+
+def read_all(fd):
+    """
+    Reads all available data from a non-blocking file descriptor.
+
+    Args:
+        fd (int): The file descriptor to read from.
+
+    Returns:
+        str: The decoded string data read from the file descriptor.
+    """
+    data = []
+    while True:
+        try:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                # No more data available
+                break
+            data.append(chunk)
+        except OSError as e:
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                # No more data available for non-blocking read
+                break
+            else:
+                # An unexpected error occurred
+                raise
+    return b''.join(data).decode('utf-8', errors='replace').strip()
+
 
 def on_clipboard_history_updated():
     """
@@ -37,7 +68,7 @@ def sigio_handler(signum, frame):
         # provides some readable content upon update.
         try:
             os.lseek(clipboard_fd, 0, os.SEEK_SET)  # Reset to start if needed
-            data = os.read(clipboard_fd, 4096).decode('utf-8', errors='replace').strip()
+            data = read_all(clipboard_fd)
             if data:
                 print(f"Clipboard Updated (/dev/clipboard): {data}")
                 if CLIPBOARD_HISTORY == data:
