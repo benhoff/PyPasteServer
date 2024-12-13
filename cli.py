@@ -77,7 +77,7 @@ def register_user(server_url, user_data):
 
 def login_user(server_url, username, password):
     """
-    Send a POST request to the /login endpoint with username and password.
+    Send a POST request to the /login endpoint with username and password as form data.
     Returns the access token if successful.
     Raises exceptions for HTTP errors or connection issues.
     """
@@ -86,11 +86,8 @@ def login_user(server_url, username, password):
         "username": username,
         "password": password
     }
-    headers = {
-        "Content-Type": "application/json"
-    }
     try:
-        response = requests.post(login_endpoint, headers=headers, json=data)
+        response = requests.post(login_endpoint, data=data)  # Sending form-encoded data
         if response.status_code == 200:
             data = response.json()
             access_token = data.get("access_token")
@@ -104,6 +101,7 @@ def login_user(server_url, username, password):
             response.raise_for_status()
     except requests.exceptions.RequestException as e:
         raise ConnectionError(f"Failed to connect to the server: {e}")
+
 
 def logout_user(token_file):
     """
@@ -253,27 +251,16 @@ def register_command(args):
         print(f"Failed to generate mnemonic: {e}")
         sys.exit(1)
     
-    # Derive seed from mnemonic
+    entropy = mnemo.to_entropy(mnemonic)
+
     try:
-        seed = derive_seed(mnemonic, "")
-        print("Seed derived successfully.")
-    except Exception as e:
-        print(f"Failed to derive seed: {e}")
-        sys.exit(1)
-    
-    # Convert seed to hex string (or keep as bytes if preferred)
-    seed_hex = convert_seed_to_hex(seed)
-    
-    # Save the token and seed_hex
-    try:
-        save_json_data({"access_token": token}, args.token_file)
-        # FIXME: don't use this method
-        save_data({"key": seed_hex}, args.key_file)
         with open(key_file, 'wb') as file:
             file.write(entropy)
+        # print("Mnemonic saved successfully.")
     except IOError as ioe:
-        print(f"Error: {ioe}")
+        print(f"Error saving the mnemonic: {ioe}")
         sys.exit(1)
+    
     
     print("\nRegistration and key generation complete.")
     print(f"Access Token saved to: {args.token_file}")

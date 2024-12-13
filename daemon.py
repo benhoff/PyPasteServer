@@ -17,9 +17,9 @@ from Crypto.Random import get_random_bytes
 import base64
 
 # Constants
-TOKEN_FILE = os.path.expanduser("~/.clipboard_app/token.json")
-ENC_KEY_FILE = os.path.expanduser("~/.clipboard_app/enc_key.bin")
-SERVER_URL = "ws://127.0.0.1:8000/ws"  # Update with your server's WebSocket URL
+TOKEN_FILE = os.path.expanduser("~/.config/clipboard_app/token.json")
+ENC_KEY_FILE = os.path.expanduser("~/.config/clipboard_app/key")
+SERVER_URL = "ws://127.0.0.1:8001/ws"  # Update with your server's WebSocket URL
 
 CLIPBOARD_HISTORY = None
 klipper = None
