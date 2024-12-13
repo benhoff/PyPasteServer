@@ -243,8 +243,9 @@ def print_key(key_file):
         print("Error: Mnemonic data is corrupted or missing.")
         sys.exit(1)
 
-    print(mnemonic_stored)
-    print("\nEnsure you transfer this mnemonic securely to another machine.")
+    if not make_key:
+        print(mnemonic_stored)
+    # print("\nEnsure you transfer this mnemonic securely to another machine.")
 
 def register_command(args):
     """
