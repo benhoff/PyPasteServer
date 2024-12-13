@@ -12,9 +12,13 @@ import threading
 import websocket
 import time
 from getpass import getpass
+from Crypto.Cipher import ChaCha20_Poly1305
+from Crypto.Random import get_random_bytes
+import base64
 
 # Constants
 TOKEN_FILE = os.path.expanduser("~/.clipboard_app/token.json")
+ENC_KEY_FILE = os.path.expanduser("~/.clipboard_app/enc_key.bin")
 SERVER_URL = "ws://127.0.0.1:8000/ws"  # Update with your server's WebSocket URL
 
 CLIPBOARD_HISTORY = None
@@ -22,6 +26,34 @@ klipper = None
 clipboard_fd = None
 ws = None
 stop_event = threading.Event()
+
+# Load Encryption Key
+def load_encryption_key():
+    """
+    Loads the encryption key from the ENC_KEY_FILE.
+    
+    Returns:
+        bytes: The 32-byte encryption key.
+    
+    Exits:
+        If the key file is missing or invalid.
+    """
+    try:
+        with open(ENC_KEY_FILE, 'rb') as f:
+            key = f.read()
+            if len(key) != 32:
+                print(f"Invalid encryption key length in {ENC_KEY_FILE}. Expected 32 bytes.", file=sys.stderr)
+                sys.exit(1)
+            return key
+    except FileNotFoundError:
+        print(f"Encryption key file not found at {ENC_KEY_FILE}.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error loading encryption key: {e}", file=sys.stderr)
+        sys.exit(1)
+
+ENC_KEY = load_encryption_key()
+cipher = ChaCha20_Poly1305.new(key=ENC_KEY)
 
 def read_all(fd):
     """
@@ -49,6 +81,7 @@ def read_all(fd):
                 # An unexpected error occurred
                 raise
     return b''.join(data).decode('utf-8', errors='replace').strip()
+
 
 def on_clipboard_history_updated():
     """
@@ -149,9 +182,8 @@ def load_token():
     Returns:
         str: The access token.
 
-    Raises:
-        FileNotFoundError: If the token file does not exist.
-        KeyError: If the access token is not found in the file.
+    Exits:
+        If the token file is missing or invalid.
     """
     try:
         with open(TOKEN_FILE, 'r') as f:
@@ -167,17 +199,68 @@ def load_token():
         print(f"Token file {TOKEN_FILE} is not valid JSON.", file=sys.stderr)
         sys.exit(1)
 
+def encrypt_message(message: str) -> dict:
+    """
+    Encrypts a plaintext message using XChaCha20Poly1305.
+    
+    Args:
+        message (str): The plaintext message to encrypt.
+    
+    Returns:
+        dict: A dictionary containing Base64-encoded nonce and ciphertext.
+    """
+    nonce = get_random_bytes(24)  # 192-bit nonce for XChaCha20
+    cipher = ChaCha20_Poly1305.new(key=ENC_KEY, nonce=nonce)
+    ciphertext, tag = cipher.encrypt_and_digest(message.encode())
+    return {
+        "nonce": base64.b64encode(nonce).decode(),
+        "ciphertext": base64.b64encode(ciphertext).decode(),
+        "tag": base64.b64encode(tag).decode()
+    }
+
+def decrypt_message(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
+    """
+    Decrypts a ciphertext message using XChaCha20Poly1305.
+    
+    Args:
+        nonce_b64 (str): Base64-encoded nonce.
+        ciphertext_b64 (str): Base64-encoded ciphertext.
+        tag_b64 (str): Base64-encoded authentication tag.
+    
+    Returns:
+        str: The decrypted plaintext message.
+    
+    Raises:
+        ValueError: If decryption fails.
+    """
+    try:
+        nonce = base64.b64decode(nonce_b64)
+        ciphertext = base64.b64decode(ciphertext_b64)
+        tag = base64.b64decode(tag_b64)
+        cipher = ChaCha20_Poly1305.new(key=ENC_KEY, nonce=nonce)
+        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+        return plaintext.decode()
+    except (ValueError, KeyError) as e:
+        print(f"Decryption failed: {e}", file=sys.stderr)
+        return ""
+
 def send_clipboard_update(text):
     """
-    Sends the clipboard update to the server via WebSocket.
-
+    Sends the encrypted clipboard update to the server via WebSocket.
+    
     Args:
         text (str): The clipboard text to send.
     """
     global ws
-    if ws and ws.connected:
+    if ws and ws.sock and ws.sock.connected:
         try:
-            message = json.dumps({"text": text})
+            encrypted_message = encrypt_message(text)
+            message = json.dumps({
+                "type": "update",
+                "nonce": encrypted_message["nonce"],
+                "ciphertext": encrypted_message["ciphertext"],
+                "tag": encrypted_message["tag"]
+            })
             ws.send(message)
         except Exception as e:
             print(f"Failed to send clipboard update: {e}", file=sys.stderr)
@@ -188,7 +271,7 @@ def on_ws_open(ws):
 def on_ws_message(ws, message):
     """
     Handles incoming messages from the server.
-
+    
     Args:
         ws: The WebSocketApp instance.
         message (str): The received message.
@@ -196,13 +279,13 @@ def on_ws_message(ws, message):
     global CLIPBOARD_HISTORY
     try:
         data = json.loads(message)
-        if data.get("type") == "update" and "text" in data:
-            new_text = data["text"]
-            if new_text != CLIPBOARD_HISTORY:
-                print(f"Clipboard Updated (WebSocket): {new_text}")
-                CLIPBOARD_HISTORY = new_text
+        if data.get("type") in ["init", "update"] and "nonce" in data and "ciphertext" in data and "tag" in data:
+            decrypted_text = decrypt_message(data["nonce"], data["ciphertext"], data["tag"])
+            if decrypted_text and decrypted_text != CLIPBOARD_HISTORY:
+                print(f"Clipboard Updated (WebSocket): {decrypted_text}")
+                CLIPBOARD_HISTORY = decrypted_text
                 if klipper:
-                    klipper.setClipboardContents(new_text)
+                    klipper.setClipboardContents(decrypted_text)
     except json.JSONDecodeError:
         print(f"Received invalid JSON message: {message}", file=sys.stderr)
 
@@ -238,18 +321,24 @@ def websocket_thread():
             print("Attempting to reconnect WebSocket in 5 seconds...")
             time.sleep(5)
 
-def on_clipboard_history_updated_threaded():
-    """
-    Threaded callback for clipboard history updates.
-    """
-    on_clipboard_history_updated()
-
 def start_websocket():
     """
     Starts the WebSocket thread.
     """
     thread = threading.Thread(target=websocket_thread, daemon=True)
     thread.start()
+
+def on_clipboard_history_updated_threaded():
+    """
+    Threaded callback for clipboard history updates.
+    """
+    on_clipboard_history_updated()
+
+def start_websocket_client():
+    """
+    Initializes and starts the WebSocket client thread.
+    """
+    start_websocket()
 
 def setup_websocket_callbacks():
     """
@@ -293,7 +382,7 @@ def main():
         setup_clipboard_device()
 
         # Start WebSocket connection
-        start_websocket()
+        start_websocket_client()
 
         print("Listening for clipboard changes (D-Bus and /dev/clipboard) and syncing via WebSocket.")
         print("Press Ctrl+C to exit.")
