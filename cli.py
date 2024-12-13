@@ -2,7 +2,6 @@
 
 import requests
 import json
-import os
 import sys
 from getpass import getpass
 from pathlib import Path
@@ -11,9 +10,9 @@ import binascii
 import argparse
 
 # Constants for default file paths
-DEFAULT_SERVER_URL = "http://127.0.0.1:8000"
-DEFAULT_TOKEN_FILE = Path.home() / ".clipboard_app" / "token.json"
-DEFAULT_KEY_FILE = Path.home() / ".clipboard_app" / "key.json"
+DEFAULT_SERVER_URL = "http://127.0.0.1:8001"
+DEFAULT_TOKEN_FILE = Path.home() / ".config" / "clipboard_app" / "token.json"
+DEFAULT_KEY_FILE = Path.home() / ".config" / "clipboard_app" / "key"
 
 def prompt_user_details():
     """
@@ -106,7 +105,7 @@ def login_user(server_url, username, password):
     except requests.exceptions.RequestException as e:
         raise ConnectionError(f"Failed to connect to the server: {e}")
 
-def logout_user(token_file, key_file):
+def logout_user(token_file):
     """
     Log out the user by deleting the stored token and key files.
     """
@@ -129,23 +128,8 @@ def generate_mnemonic():
     entropy = mnemo.generate(strength=256)  # 12-word mnemonic
     return entropy
 
-def derive_seed(mnemonic, passphrase=''):
-    """
-    Derive a binary seed from the mnemonic and optional passphrase.
-    Returns the seed as bytes.
-    """
-    mnemo = Mnemonic("english")
-    seed = mnemo.to_seed(mnemonic, passphrase)
-    return seed
 
-def convert_seed_to_hex(seed_bytes):
-    """
-    Convert seed bytes to a hexadecimal string.
-    Returns the hex string.
-    """
-    return binascii.hexlify(seed_bytes).decode()
-
-def save_data(data, filepath):
+def save_json_data(data, filepath):
     """
     Save data to a specified file in JSON format.
     """
@@ -157,7 +141,7 @@ def save_data(data, filepath):
     except IOError as e:
         raise IOError(f"Failed to write data to file: {e}")
 
-def load_data(filepath):
+def load_json_data(filepath):
     """
     Load data from a specified file.
     Returns the data as a dictionary.
@@ -173,7 +157,7 @@ def sync_with_server(server_url, token_file):
     Sync with the server by fetching the user's clipboard content.
     """
     clipboard_endpoint = f"{server_url}/clipboard"
-    token_data = load_data(token_file)
+    token_data = load_json_data(token_file)
     if not token_data or not token_data.get("access_token"):
         raise ValueError("No access token found. Please login or register first.")
     
@@ -196,55 +180,48 @@ def sync_with_server(server_url, token_file):
     except requests.exceptions.RequestException as e:
         raise ConnectionError(f"Failed to connect to the server: {e}")
 
-import binascii
-from mnemonic import Mnemonic
-from getpass import getpass
 
 def print_key(key_file):
     """
     Print the mnemonic phrase for transfer to another machine.
     If the mnemonic does not exist, generate a new one and store it.
     """
-    key_data = load_data(key_file)
     make_key = False
+    key_data = None
 
-    # Check if the mnemonic already exists
-    if not key_data or not key_data.get("mnemonic"):
+    try:
+        with open(key_file, "rb") as f:
+            key_data = f.read()
+    except IOError:
         make_key = True
 
+    # Check if the mnemonic already exists
     mnemo = Mnemonic("english")
 
     if make_key:
         try:
             # Generate a new mnemonic
             mnemonic = mnemo.generate(strength=256)  # 24-word mnemonic for better security
-            print("Mnemonic generated successfully:")
-            print(mnemonic)
+            # print("Mnemonic generated successfully:")
+            # print(mnemonic)
         except Exception as e:
             print(f"Failed to generate mnemonic: {e}")
             sys.exit(1)
 
-        seed = mnemo.to_seed(mnemonic, "")
+        entropy = mnemo.to_entropy(mnemonic)
 
         try:
-            # Save the mnemonic to the key file
-            save_data({"mnemonic": mnemonic}, key_file)
-            print("Mnemonic saved successfully.")
+            with open(key_file, 'wb') as file:
+                file.write(entropy)
+            # print("Mnemonic saved successfully.")
         except IOError as ioe:
             print(f"Error saving the mnemonic: {ioe}")
             sys.exit(1)
 
-        # Reload the key data to ensure it's saved
-        key_data = load_data(key_file)
+        with open(key_file, "rb") as f:
+            key_data = f.read()
 
-    # Retrieve the mnemonic
-    mnemonic_stored = key_data.get("mnemonic")
-    if not mnemonic_stored:
-        print("Error: Mnemonic data is corrupted or missing.")
-        sys.exit(1)
-
-    if not make_key:
-        print(mnemonic_stored)
+    print(mnemo.to_mnemonic(key_data))
     # print("\nEnsure you transfer this mnemonic securely to another machine.")
 
 def register_command(args):
@@ -289,8 +266,11 @@ def register_command(args):
     
     # Save the token and seed_hex
     try:
-        save_data({"access_token": token}, args.token_file)
+        save_json_data({"access_token": token}, args.token_file)
+        # FIXME: don't use this method
         save_data({"key": seed_hex}, args.key_file)
+        with open(key_file, 'wb') as file:
+            file.write(entropy)
     except IOError as ioe:
         print(f"Error: {ioe}")
         sys.exit(1)
@@ -331,7 +311,7 @@ def login_command(args):
     
     # Save the token
     try:
-        save_data({"access_token": token}, args.token_file)
+        save_json_data({"access_token": token}, args.token_file)
     except IOError as ioe:
         print(f"Error: {ioe}")
         sys.exit(1)
@@ -427,8 +407,6 @@ def main():
     parser_logout = subparsers.add_parser("logout", help="Log out")
     parser_logout.add_argument('--token-file', type=Path, default=DEFAULT_TOKEN_FILE,
                                help=f"Path to the access token file (default: {DEFAULT_TOKEN_FILE})")
-    parser_logout.add_argument('--key-file', type=Path, default=DEFAULT_KEY_FILE,
-                               help=f"Path to the byte-based key file (default: {DEFAULT_KEY_FILE})")
     parser_logout.set_defaults(func=logout_command)
 
     # Sync Command
