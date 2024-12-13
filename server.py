@@ -1,16 +1,15 @@
-# server.py
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Header, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Optional, Generator, Dict
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, ForeignKey, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 import asyncio
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, EmailStr
+import uuid
 
 # ####################
 # Configuration
@@ -56,6 +55,14 @@ class Clipboard(Base):
 
     owner = relationship("User", back_populates="clipboard")
 
+
+class TokenBlacklist(Base):
+    __tablename__ = "token_blacklist"
+
+    id = Column(Integer, primary_key=True, index=True)
+    jti = Column(String(36), unique=True, nullable=False)  # UUID4 has 36 characters
+    expires_at = Column(DateTime, nullable=False)
+
 # Create all tables
 Base.metadata.create_all(bind=engine)
 
@@ -88,22 +95,31 @@ def get_password_hash(password: str) -> str:
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
+def create_access_token(data: dict, expires_delta: timedelta = None) -> (str, str):
     to_encode = data.copy()
+    jti = str(uuid.uuid4())
+    to_encode.update({"jti": jti})
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
         expire = datetime.utcnow() + timedelta(minutes=15)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
-    return encoded_jwt
+    return encoded_jwt, jti  # Return jti along with the token
 
-def decode_token(token: str) -> str:
+def decode_token(token: str, db: Session) -> str:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username: str = payload.get("sub")
-        if username is None:
+        jti: str = payload.get("jti")
+        if username is None or jti is None:
             raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Check if jti is in blacklist
+        blacklisted = db.query(TokenBlacklist).filter(TokenBlacklist.jti == jti).first()
+        if blacklisted:
+            raise HTTPException(status_code=401, detail="Token has been revoked")
+        
         return username
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -120,7 +136,7 @@ def get_db() -> Generator:
 def get_current_user(token: Optional[str] = Header(None), db: Session = Depends(get_db)) -> User:
     if token is None:
         raise HTTPException(status_code=401, detail="Missing token")
-    username = decode_token(token)
+    username = decode_token(token, db)
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid user")
@@ -183,7 +199,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     initialize_user_clipboard(db, new_user)
 
     access_token_expires = timedelta(minutes=JWT_EXPIRATION_MINUTES)
-    access_token = create_access_token(
+    access_token, jti = create_access_token(
         data={"sub": new_user.username}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
@@ -197,10 +213,38 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             detail="Incorrect username or password"
         )
     access_token_expires = timedelta(minutes=JWT_EXPIRATION_MINUTES)
-    access_token = create_access_token(
+    access_token, jti = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/logout", status_code=200)
+def logout(current_user: User = Depends(get_current_user), authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    if authorization is None or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=400, detail="Invalid authorization header")
+    
+    token = authorization.split(" ")[1]
+    
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        if jti is None or exp is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        # Check if the token is already blacklisted
+        existing_blacklist = db.query(TokenBlacklist).filter(TokenBlacklist.jti == jti).first()
+        if existing_blacklist:
+            raise HTTPException(status_code=400, detail="Token already revoked")
+        
+        # Add the token's jti to the blacklist
+        blacklist_entry = TokenBlacklist(jti=jti, expires_at=datetime.utcfromtimestamp(exp))
+        db.add(blacklist_entry)
+        db.commit()
+        
+        return {"detail": "Successfully logged out"}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # #################
 # Clipboard Management
@@ -249,15 +293,21 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         return
 
     try:
-        username = decode_token(token)
-        # Verify the user exists in the database
         db = SessionLocal()
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username = payload.get("sub")
+        jti = payload.get("jti")
+        if username is None or jti is None:
+            raise JWTError
+        # Check if the token is blacklisted
+        blacklisted = db.query(TokenBlacklist).filter(TokenBlacklist.jti == jti).first()
+        if blacklisted:
+            raise JWTError
         user = db.query(User).filter(User.username == username).first()
-        db.close()
         if not user:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-    except HTTPException:
+            raise JWTError
+        db.close()
+    except JWTError:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -312,3 +362,4 @@ async def broadcast_clipboard_update(user_id: int, text: str):
         connections.remove(conn)
     if not connections:
         del active_connections[user_id]
+
