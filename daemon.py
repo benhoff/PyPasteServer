@@ -68,6 +68,7 @@ TOKEN_FILE = os.path.expanduser(config.get('Paths', 'token_file'))
 ENC_KEY_FILE = os.path.expanduser(config.get('Paths', 'enc_key_file'))
 SERVER_URL = strip_http_prefix(config.get('Server', 'url'))
 NONCE_SIZE = config.getint('Encryption', 'nonce_size')
+MAX_RETRIES = config.getint('Retry', 'max_retries', fallback=5)
 
 # Optional: Logging setup based on config (if you decide to implement logging)
 # import logging
@@ -109,33 +110,79 @@ def load_encryption_key():
 ENC_KEY = load_encryption_key()
 cipher = ChaCha20_Poly1305.new(key=ENC_KEY)
 
-def read_all(fd):
+def read_all(fd, retry_count=MAX_RETRIES):
     """
-    Reads all available data from a non-blocking file descriptor.
+    Attempts to read all available data from a non-blocking file descriptor.
+    If EWOULDBLOCK is encountered, schedules a limited number of retries.
 
     Args:
         fd (int): The file descriptor to read from.
+        retry_count (int): The number of remaining retry attempts.
 
     Returns:
         str: The decoded string data read from the file descriptor.
     """
     data = []
-    while True:
-        try:
+    try:
+        while True:
             chunk = os.read(fd, 4096)
             if not chunk:
                 # No more data available
                 break
             data.append(chunk)
-        except OSError as e:
-            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                # No more data available for non-blocking read
-                break
+    except OSError as e:
+        if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+            if retry_count > 0:
+                # Schedule a retry with decremented retry_count
+                GLib.timeout_add(100, lambda: handle_retry_read(fd, retry_count - 1))
+                print(f"EWOULDBLOCK encountered. Retrying in 100ms... ({MAX_RETRIES - retry_count + 1}/{MAX_RETRIES})")
             else:
-                # An unexpected error occurred
-                raise
+                print(f"Maximum retry attempts ({MAX_RETRIES}) reached. Giving up on reading from fd {fd}.", file=sys.stderr)
+            return ""  # Return empty string as no data was read this time
+        else:
+            # An unexpected error occurred
+            raise
+
+    # Decode and return the accumulated data
     return b''.join(data).decode('utf-8', errors='replace').strip()
 
+def handle_retry_read(fd, retry_count):
+    """
+    Handles retrying the read operation after a short delay.
+
+    Args:
+        fd (int): The file descriptor to read from.
+        retry_count (int): The number of remaining retry attempts.
+
+    Returns:
+        bool: False to ensure the timeout is not called again.
+    """
+    try:
+        data = read_all(fd, retry_count)
+        if data:
+            process_read_data(data)
+    except Exception as e:
+        print(f"Error during retry read: {e}", file=sys.stderr)
+    return False  # Ensure this timeout handler is only called once
+
+def process_read_data(data):
+    """
+    Processes the data read from the clipboard device.
+
+    Args:
+        data (str): The clipboard data to process.
+    """
+    global CLIPBOARD_HISTORY
+    if data and data != CLIPBOARD_HISTORY:
+        print(f"Clipboard Updated (/dev/clipboard): {data}")
+        CLIPBOARD_HISTORY = data
+        if klipper:
+            try:
+                klipper.setClipboardContents(data)
+            except dbus.DBusException as e:
+                print(f"Error setting clipboard contents in Klipper: {e}", file=sys.stderr)
+        # Send the updated clipboard content to the server
+        send_clipboard_update(data)
 
 def on_clipboard_history_updated():
     """
