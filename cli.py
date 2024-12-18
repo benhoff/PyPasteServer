@@ -407,41 +407,41 @@ def main():
 
     # Register Command
     parser_register = subparsers.add_parser("register", help="Register with the configured server")
-    parser_register.add_argument('--server', type=str, default=SERVER_URL,  # CHANGE: Use SERVER_URL from config
+    parser_register.add_argument('--server', type=str, default=SERVER_URL,
                                  help=f"URL of the registration server (default: {SERVER_URL})")
-    parser_register.add_argument('--token-file', type=Path, default=TOKEN_FILE,  # CHANGE: Use TOKEN_FILE from config
+    parser_register.add_argument('--token-file', type=Path, default=TOKEN_FILE,
                                  help=f"Path to save the access token (default: {TOKEN_FILE})")
-    parser_register.add_argument('--key-file', type=Path, default=KEY_FILE,  # CHANGE: Use KEY_FILE from config
+    parser_register.add_argument('--key-file', type=Path, default=KEY_FILE,
                                  help=f"Path to save the byte-based key (default: {KEY_FILE})")
     parser_register.set_defaults(func=register_command)
 
     # Login Command
     parser_login = subparsers.add_parser("login", help="Login to the configured server")
-    parser_login.add_argument('--server', type=str, default=SERVER_URL,  # CHANGE: Use SERVER_URL from config
+    parser_login.add_argument('--server', type=str, default=SERVER_URL,
                               help=f"URL of the server (default: {SERVER_URL})")
-    parser_login.add_argument('--token-file', type=Path, default=TOKEN_FILE,  # CHANGE: Use TOKEN_FILE from config
+    parser_login.add_argument('--token-file', type=Path, default=TOKEN_FILE,
                               help=f"Path to save the access token (default: {TOKEN_FILE})")
     parser_login.set_defaults(func=login_command)
 
     # Logout Command
     parser_logout = subparsers.add_parser("logout", help="Log out")
-    parser_logout.add_argument('--token-file', type=Path, default=TOKEN_FILE,  # CHANGE: Use TOKEN_FILE from config
+    parser_logout.add_argument('--token-file', type=Path, default=TOKEN_FILE,
                                help=f"Path to the access token file (default: {TOKEN_FILE})")
-    parser_logout.add_argument('--key-file', type=Path, default=KEY_FILE,  # CHANGE: Add key_file argument
-                               help=f"Path to the byte-based key file (default: {KEY_FILE})")  # CHANGE: Necessary for logout
+    parser_logout.add_argument('--key-file', type=Path, default=KEY_FILE,
+                               help=f"Path to the byte-based key file (default: {KEY_FILE})")
     parser_logout.set_defaults(func=logout_command)
 
     # Sync Command
     parser_sync = subparsers.add_parser("sync", help="Sync with the configured server")
-    parser_sync.add_argument('--server', type=str, default=SERVER_URL,  # CHANGE: Use SERVER_URL from config
+    parser_sync.add_argument('--server', type=str, default=SERVER_URL,
                              help=f"URL of the server (default: {SERVER_URL})")
-    parser_sync.add_argument('--token-file', type=Path, default=TOKEN_FILE,  # CHANGE: Use TOKEN_FILE from config
+    parser_sync.add_argument('--token-file', type=Path, default=TOKEN_FILE,
                              help=f"Path to the access token file (default: {TOKEN_FILE})")
     parser_sync.set_defaults(func=sync_command)
 
     # Key Command
     parser_key = subparsers.add_parser("key", help="Print the encryption key for transfer to another machine")
-    parser_key.add_argument('--key-file', type=Path, default=KEY_FILE,  # CHANGE: Use KEY_FILE from config
+    parser_key.add_argument('--key-file', type=Path, default=KEY_FILE,
                             help=f"Path to the byte-based key file (default: {KEY_FILE})")
     parser_key.set_defaults(func=key_command)
 
