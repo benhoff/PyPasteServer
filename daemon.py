@@ -194,7 +194,7 @@ def on_clipboard_device_ready(source, condition):
         try:
             # Read the new clipboard data from /dev/clipboard
             os.lseek(clipboard_fd, 0, os.SEEK_SET)  # Reset to start if needed
-            data = os.read(clipboard_fd, 4096).decode('utf-8', errors='replace').strip()
+            data = read_all(clipboard_fd)
             if data and data != CLIPBOARD_HISTORY:
                 print(f"Clipboard Updated (/dev/clipboard): {data}")
                 CLIPBOARD_HISTORY = data
