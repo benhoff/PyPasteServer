@@ -15,11 +15,47 @@ from getpass import getpass
 from Crypto.Cipher import ChaCha20_Poly1305
 from Crypto.Random import get_random_bytes
 import base64
+import configparser
+from pathlib import Path
 
-# Constants
-TOKEN_FILE = os.path.expanduser("~/.config/clipboard_app/token.json")
-ENC_KEY_FILE = os.path.expanduser("~/.config/clipboard_app/key")
-SERVER_URL = "ws://127.0.0.1:8001/ws"  # Update with your server's WebSocket URL
+# Load Configuration
+def load_config():
+    """
+    Loads the configuration from the config.ini file.
+    
+    Returns:
+        configparser.ConfigParser: The loaded configuration.
+    
+    Exits:
+        If the configuration file is missing or invalid.
+    """
+    config = configparser.ConfigParser()
+    config_path = os.path.expanduser("~/.config/clipboard_app/config.ini")
+    
+    if not os.path.exists(config_path):
+        print(f"Configuration file not found at {config_path}.", file=sys.stderr)
+        sys.exit(1)
+    
+    try:
+        config.read(config_path)
+        return config
+    except configparser.Error as e:
+        print(f"Error parsing configuration file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+config = load_config()
+
+# Extract configuration values
+TOKEN_FILE = os.path.expanduser(config.get('Paths', 'token_file'))
+ENC_KEY_FILE = os.path.expanduser(config.get('Paths', 'enc_key_file'))
+SERVER_URL = config.get('Server', 'url')
+NONCE_SIZE = config.getint('Encryption', 'nonce_size')
+
+# Optional: Logging setup based on config (if you decide to implement logging)
+# import logging
+# log_level = config.get('Logging', 'log_level', fallback='INFO').upper()
+# logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
+# logger = logging.getLogger(__name__)
 
 CLIPBOARD_HISTORY = None
 klipper = None
@@ -201,7 +237,7 @@ def load_token():
 
 def encrypt_message(message: str) -> dict:
     """
-    Encrypts a plaintext message using XChaCha20Poly1305.
+    Encrypts a plaintext message using ChaCha20-Poly1305.
     
     Args:
         message (str): The plaintext message to encrypt.
@@ -209,7 +245,7 @@ def encrypt_message(message: str) -> dict:
     Returns:
         dict: A dictionary containing Base64-encoded nonce and ciphertext.
     """
-    nonce = get_random_bytes(24)  # 192-bit nonce for XChaCha20
+    nonce = get_random_bytes(NONCE_SIZE)  # Use nonce size from config
     cipher = ChaCha20_Poly1305.new(key=ENC_KEY, nonce=nonce)
     ciphertext, tag = cipher.encrypt_and_digest(message.encode())
     return {
@@ -220,7 +256,7 @@ def encrypt_message(message: str) -> dict:
 
 def decrypt_message(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
     """
-    Decrypts a ciphertext message using XChaCha20Poly1305.
+    Decrypts a ciphertext message using ChaCha20-Poly1305.
     
     Args:
         nonce_b64 (str): Base64-encoded nonce.
