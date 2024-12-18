@@ -279,7 +279,7 @@ def prompt_for_mnemonic():
     """
     mnemo = Mnemonic("english")
     while True:
-        mnemonic = getpass("Enter your 24-word mnemonic phrase: ").strip()
+        mnemonic = input("Enter your 24-word mnemonic phrase: ").strip()
         if mnemo.check(mnemonic):
             return mnemonic
         else:
