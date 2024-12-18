@@ -43,12 +43,30 @@ def load_config():
         print(f"Error parsing configuration file: {e}", file=sys.stderr)
         sys.exit(1)
 
+
+def strip_http_prefix(url):
+    """
+    Strips 'http://' or 'https://' from the beginning of the URL if present.
+
+    Args:
+        url (str): The original URL.
+
+    Returns:
+        str: The URL without the 'http://' or 'https://' prefix.
+    """
+    if url.startswith("http://"):
+        return url[len("http://"):]
+    elif url.startswith("https://"):
+        return url[len("https://"):]
+    return url
+
+
 config = load_config()
 
 # Extract configuration values
 TOKEN_FILE = os.path.expanduser(config.get('Paths', 'token_file'))
 ENC_KEY_FILE = os.path.expanduser(config.get('Paths', 'enc_key_file'))
-SERVER_URL = config.get('Server', 'url')
+SERVER_URL = strip_http_prefix(config.get('Server', 'url'))
 NONCE_SIZE = config.getint('Encryption', 'nonce_size')
 
 # Optional: Logging setup based on config (if you decide to implement logging)
@@ -337,7 +355,7 @@ def websocket_thread():
     """
     global ws
     access_token = load_token()
-    ws_url = f"{SERVER_URL}?token={access_token}"
+    ws_url = f"ws://{SERVER_URL}/ws?token={access_token}"
 
     ws = websocket.WebSocketApp(
         ws_url,
