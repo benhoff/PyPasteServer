@@ -35,10 +35,11 @@ def load_config():
         print(f"Error parsing configuration file: {e}", file=sys.stderr)
         sys.exit(1)
 
-# CHANGE: Load configuration
+
+# Load configuration
 config = load_config()
 
-# CHANGE: Extract configuration values
+# Extract configuration values
 SERVER_URL = config.get('Server', 'url', fallback="http://127.0.0.1:8001")
 TOKEN_FILE = Path(os.path.expanduser(config.get('Paths', 'token_file', fallback="~/.config/clipboard_app/token.json")))
 KEY_FILE = Path(os.path.expanduser(config.get('Paths', 'enc_key_file', fallback="~/.config/clipboard_app/key")))
@@ -77,6 +78,7 @@ def prompt_user_details():
         "password": password
     }
 
+
 def register_user(server_url, user_data):
     """
     Send a POST request to the /register endpoint with user_data.
@@ -104,6 +106,7 @@ def register_user(server_url, user_data):
             response.raise_for_status()
     except requests.exceptions.RequestException as e:
         raise ConnectionError(f"Failed to connect to the server: {e}")
+
 
 def login_user(server_url, username, password):
     """
@@ -133,7 +136,7 @@ def login_user(server_url, username, password):
         raise ConnectionError(f"Failed to connect to the server: {e}")
 
 
-def logout_user(token_file):
+def logout_user(token_file, key_file):
     """
     Log out the user by deleting the stored token and key files.
     """
@@ -144,8 +147,15 @@ def logout_user(token_file):
         else:
             print(f"No access token found at '{token_file}'.")
         
+        if key_file.exists():
+            key_file.unlink()
+            print(f"Encryption key '{key_file}' deleted successfully.")
+        else:
+            print(f"No encryption key found at '{key_file}'.")
+        
     except Exception as e:
         raise IOError(f"Failed to delete files: {e}")
+
 
 def generate_mnemonic():
     """
@@ -153,7 +163,7 @@ def generate_mnemonic():
     Returns the mnemonic as a string.
     """
     mnemo = Mnemonic("english")
-    entropy = mnemo.generate(strength=256)  # 12-word mnemonic
+    entropy = mnemo.generate(strength=256)  # 24-word mnemonic for better security
     return entropy
 
 
@@ -169,6 +179,7 @@ def save_json_data(data, filepath):
     except IOError as e:
         raise IOError(f"Failed to write data to file: {e}")
 
+
 def load_json_data(filepath):
     """
     Load data from a specified file.
@@ -179,6 +190,7 @@ def load_json_data(filepath):
             return json.load(f)
     except (IOError, json.JSONDecodeError):
         return None
+
 
 def sync_with_server(server_url, token_file):
     """
@@ -217,6 +229,8 @@ def print_key(key_file):
     make_key = False
     key_data = None
 
+    mnemo = Mnemonic("english")  # Initialize Mnemonic instance
+
     try:
         with open(key_file, "rb") as f:
             key_data = f.read()
@@ -224,14 +238,12 @@ def print_key(key_file):
         make_key = True
 
     # Check if the mnemonic already exists
-    mnemo = Mnemonic("english")
-
     if make_key:
         try:
             # Generate a new mnemonic
             mnemonic = mnemo.generate(strength=256)  # 24-word mnemonic for better security
-            # print("Mnemonic generated successfully:")
-            # print(mnemonic)
+            print("Mnemonic generated successfully:")
+            print(mnemonic)
         except Exception as e:
             print(f"Failed to generate mnemonic: {e}")
             sys.exit(1)
@@ -241,16 +253,65 @@ def print_key(key_file):
         try:
             with open(key_file, 'wb') as file:
                 file.write(entropy)
-            # print("Mnemonic saved successfully.")
+            print("Mnemonic saved successfully.")
         except IOError as ioe:
             print(f"Error saving the mnemonic: {ioe}")
             sys.exit(1)
 
-        with open(key_file, "rb") as f:
-            key_data = f.read()
+        key_data = entropy
 
-    print(mnemo.to_mnemonic(key_data))
-    # print("\nEnsure you transfer this mnemonic securely to another machine.")
+    # If key_data exists, convert it back to mnemonic
+    if key_data:
+        try:
+            mnemonic = mnemo.to_mnemonic(key_data)
+            print("\nYour Mnemonic Phrase:")
+            print(mnemonic)
+            print("\nEnsure you transfer this mnemonic securely to another machine.")
+        except Exception as e:
+            print(f"Error converting key to mnemonic: {e}")
+            sys.exit(1)
+
+
+def prompt_for_mnemonic():
+    """
+    Prompt the user to enter their mnemonic phrase.
+    Returns the mnemonic as a string.
+    """
+    mnemo = Mnemonic("english")
+    while True:
+        mnemonic = getpass("Enter your 24-word mnemonic phrase: ").strip()
+        if mnemo.check(mnemonic):
+            return mnemonic
+        else:
+            print("Invalid mnemonic phrase. Please try again.")
+
+
+def generate_and_save_mnemonic(key_file):
+    """
+    Generate a new mnemonic phrase and save its entropy to key_file.
+    Returns the mnemonic.
+    """
+    mnemo = Mnemonic("english")
+    try:
+        mnemonic = mnemo.generate(strength=256)  # 24-word mnemonic for better security
+        print("\nGenerated Mnemonic Phrase:")
+        print(mnemonic)
+    except Exception as e:
+        print(f"Failed to generate mnemonic: {e}")
+        sys.exit(1)
+
+    entropy = mnemo.to_entropy(mnemonic)
+
+    try:
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(key_file, 'wb') as file:
+            file.write(entropy)
+        print("\nMnemonic saved successfully.")
+    except IOError as ioe:
+        print(f"Error saving the mnemonic: {ioe}")
+        sys.exit(1)
+    
+    return mnemonic
 
 
 def register_command(args):
@@ -275,9 +336,11 @@ def register_command(args):
         sys.exit(1)
     
     # Generate mnemonic
+    mnemo = Mnemonic("english")  # Initialize Mnemonic instance
     try:
-        mnemonic = generate_mnemonic()
-        print("Mnemonic generated successfully.")
+        mnemonic = mnemo.generate(strength=256)  # 24-word mnemonic for better security
+        print("\nMnemonic generated successfully:")
+        print(mnemonic)
     except Exception as e:
         print(f"Failed to generate mnemonic: {e}")
         sys.exit(1)
@@ -285,17 +348,24 @@ def register_command(args):
     entropy = mnemo.to_entropy(mnemonic)
 
     try:
-        with open(key_file, 'wb') as file:
+        with open(args.key_file, 'wb') as file:
             file.write(entropy)
-        # print("Mnemonic saved successfully.")
+        print("Mnemonic saved successfully.")
     except IOError as ioe:
         print(f"Error saving the mnemonic: {ioe}")
         sys.exit(1)
     
+    # Save the access token
+    try:
+        save_json_data({"access_token": token}, args.token_file)
+    except IOError as ioe:
+        print(f"Error: {ioe}")
+        sys.exit(1)
     
     print("\nRegistration and key generation complete.")
     print(f"Access Token saved to: {args.token_file}")
     print(f"Byte-Based Key saved to: {args.key_file}")
+
 
 def login_command(args):
     """
@@ -336,13 +406,41 @@ def login_command(args):
     
     print(f"\nAccess Token saved to: {args.token_file}")
 
+    # Handle Encryption Key Interactively
+    print("\n=== Encryption Key Management ===")
+    while True:
+        choice = input("Do you want to provide an existing mnemonic? (yes/no): ").strip().lower()
+        if choice in ["yes", "y"]:
+            # Prompt user to enter existing mnemonic
+            mnemonic = prompt_for_mnemonic()
+            mnemo = Mnemonic("english")
+            entropy = mnemo.to_entropy(mnemonic)
+            try:
+                args.key_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(args.key_file, 'wb') as file:
+                    file.write(entropy)
+                print("Mnemonic saved successfully.")
+            except IOError as ioe:
+                print(f"Error saving the mnemonic: {ioe}")
+                sys.exit(1)
+            break
+        elif choice in ["no", "n"]:
+            # Generate a new mnemonic automatically
+            generate_and_save_mnemonic(args.key_file)
+            break
+        else:
+            print("Invalid input. Please enter 'yes' or 'no'.")
+
+    print("\nLogin and key management complete.")
+    print(f"Encryption Key saved to: {args.key_file}")
+
 
 def logout_command(args):
     """
     Handle the logout command.
     """
     try:
-        logout_user(args.token_file, args.key_file)  # CHANGE: Pass key_file argument
+        logout_user(args.token_file, args.key_file)  # Pass key_file argument
         print("Logout successful.")
     except IOError as ioe:
         print(f"Error: {ioe}")
@@ -368,6 +466,7 @@ def sync_command(args):
         print(f"An unexpected error occurred: {e}")
         sys.exit(1)
 
+
 def key_command(args):
     """
     Handle the key command.
@@ -380,6 +479,7 @@ def key_command(args):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         sys.exit(1)
+
 
 def help_command(args, parser):
     """
@@ -394,6 +494,7 @@ def help_command(args, parser):
     else:
         # Print general help
         parser.print_help()
+
 
 def main():
     """
@@ -421,6 +522,9 @@ def main():
                               help=f"URL of the server (default: {SERVER_URL})")
     parser_login.add_argument('--token-file', type=Path, default=TOKEN_FILE,
                               help=f"Path to save the access token (default: {TOKEN_FILE})")
+    parser_login.add_argument('--key-file', type=Path, default=KEY_FILE,
+                              help=f"Path to save the byte-based key (default: {KEY_FILE})")
+    # Removed --key-option argument
     parser_login.set_defaults(func=login_command)
 
     # Logout Command
