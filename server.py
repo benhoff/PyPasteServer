@@ -328,9 +328,20 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         await websocket.send_json({"type": "init", "text": initial_text})
 
         while True:
-            # Keep the connection open. Optionally, handle incoming messages
-            await websocket.receive_text()
-
+            # CHANGE: Receive the incoming message without decrypting
+            message = await websocket.receive_text()
+            
+            # CHANGE: Broadcast the message to all other connected clients for this user
+            for connection in active_connections[user.id]:
+                if connection != websocket:
+                    try:
+                        await connection.send_text(message)
+                    except Exception as e:
+                        print(f"Failed to send message to a connection: {e}")
+                        # Optionally, close and remove the faulty connection
+                        await connection.close()
+                        active_connections[user.id].remove(connection)
+            
     except WebSocketDisconnect:
         active_connections[user.id].remove(websocket)
         if not active_connections[user.id]:
@@ -355,7 +366,8 @@ async def broadcast_clipboard_update(user_id: int, text: str):
     for connection in connections:
         try:
             await connection.send_json({"type": "update", "text": text})
-        except Exception:
+        except Exception as e:
+            print(f"Failed to send message to a connection: {e}")
             to_remove.append(connection)
     # Clean up broken connections
     for conn in to_remove:
