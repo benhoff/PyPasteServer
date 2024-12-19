@@ -1,8 +1,8 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Header, Query
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import List, Optional, Generator, Dict
+from typing import List, Optional, Dict
 from jose import jwt, JWTError
-from datetime import datetime, timedelta
+from datetime import datetime
 from passlib.context import CryptContext
 from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, ForeignKey, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
@@ -10,6 +10,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, EmailStr
 import uuid
+import json
 
 # ####################
 # Configuration
@@ -137,7 +138,7 @@ def decode_token(token: str, db: Session) -> User:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # Dependency to get DB session
-def get_db() -> Generator:
+def get_db() -> Session:
     db = SessionLocal()
     try:
         yield db
@@ -163,6 +164,57 @@ def initialize_user_clipboard(db: Session, user: User):
     db.add(clipboard)
     db.commit()
     db.refresh(clipboard)
+
+# #################
+# Connection Manager
+# #################
+
+class ConnectionManager:
+    def __init__(self):
+        # Maps user_id to a set of WebSocket connections
+        self.active_connections: Dict[int, List[WebSocket]] = {}
+        self.lock = asyncio.Lock()
+
+    async def connect(self, user_id: int, websocket: WebSocket):
+        await websocket.accept()
+        async with self.lock:
+            if user_id not in self.active_connections:
+                self.active_connections[user_id] = []
+            self.active_connections[user_id].append(websocket)
+        print(f"User {user_id} connected. Total connections: {len(self.active_connections[user_id])}")
+
+    async def disconnect(self, user_id: int, websocket: WebSocket):
+        async with self.lock:
+            if user_id in self.active_connections:
+                if websocket in self.active_connections[user_id]:
+                    self.active_connections[user_id].remove(websocket)
+                    print(f"User {user_id} disconnected. Remaining connections: {len(self.active_connections[user_id])}")
+                if not self.active_connections[user_id]:
+                    del self.active_connections[user_id]
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        await websocket.send_text(message)
+
+    async def broadcast(self, user_id: int, message: dict):
+        async with self.lock:
+            connections = self.active_connections.get(user_id, []).copy()
+        to_remove = []
+        for connection in connections:
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                print(f"Failed to send message to connection: {e}")
+                to_remove.append(connection)
+        if to_remove:
+            async with self.lock:
+                for conn in to_remove:
+                    if conn in self.active_connections.get(user_id, []):
+                        self.active_connections[user_id].remove(conn)
+                if not self.active_connections[user_id]:
+                    del self.active_connections[user_id]
+
+# Initialize the ConnectionManager
+manager = ConnectionManager()
 
 # #################
 # Initialize FastAPI with Lifespan
@@ -278,16 +330,13 @@ def update_clipboard(
     db.refresh(clipboard_entry)
 
     # Broadcast the updated content to all connected websockets for this user
-    asyncio.create_task(broadcast_clipboard_update(current_user.id, clipboard_entry.text))
+    asyncio.create_task(manager.broadcast(current_user.id, {"type": "update", "text": clipboard_entry.text}))
 
     return {"text": clipboard_entry.text}
 
 # #################
 # WebSocket Handler
 # #################
-
-# Store active WebSocket connections per user
-active_connections: Dict[int, List[WebSocket]] = {}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(None)):
@@ -319,13 +368,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    # Accept the connection
-    await websocket.accept()
-
-    # Add to active connections
-    if user.id not in active_connections:
-        active_connections[user.id] = []
-    active_connections[user.id].append(websocket)
+    # Connect the WebSocket
+    await manager.connect(user.id, websocket)
 
     try:
         # Send initial clipboard content
@@ -337,49 +381,28 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
         while True:
             # Receive the incoming message
-            message = await websocket.receive_text()
-            
-            # Broadcast the message to all other connected clients for this user
-            for connection in active_connections[user.id]:
-                if connection != websocket:
-                    try:
-                        await connection.send_text(message)
-                    except Exception as e:
-                        print(f"Failed to send message to a connection: {e}")
-                        # Optionally, close and remove the faulty connection
-                        await connection.close()
-                        active_connections[user.id].remove(connection)
-            
+            data = await websocket.receive_text()
+            # Here, you can define how to handle incoming messages.
+            # For example, updating the clipboard or handling specific commands.
+
+            # For demonstration, let's assume incoming messages are clipboard updates
+            # Update the clipboard in the database
+            db = SessionLocal()
+            clipboard_entry = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
+            if not clipboard_entry:
+                clipboard_entry = Clipboard(text=data, owner_id=user.id)
+                db.add(clipboard_entry)
+            else:
+                clipboard_entry.text = data
+            db.commit()
+            db.refresh(clipboard_entry)
+            db.close()
+
+            # Broadcast the updated content to all connected websockets for this user
+            await manager.broadcast(user.id, {"type": "update", "text": clipboard_entry.text})
+
     except WebSocketDisconnect:
-        active_connections[user.id].remove(websocket)
-        if not active_connections[user.id]:
-            del active_connections[user.id]
+        await manager.disconnect(user.id, websocket)
     except Exception as e:
-        active_connections[user.id].remove(websocket)
-        if not active_connections[user.id]:
-            del active_connections[user.id]
-        # Optionally log the exception
+        await manager.disconnect(user.id, websocket)
         print(f"WebSocket error for user {user.username}: {e}")
-
-# ####################
-# Helper Functions
-# ####################
-
-async def broadcast_clipboard_update(user_id: int, text: str):
-    """
-    Broadcast the updated clipboard content to all connected websocket clients of a specific user.
-    """
-    connections = active_connections.get(user_id, [])
-    to_remove = []
-    for connection in connections:
-        try:
-            await connection.send_json({"type": "update", "text": text})
-        except Exception as e:
-            print(f"Failed to send message to a connection: {e}")
-            to_remove.append(connection)
-    # Clean up broken connections
-    for conn in to_remove:
-        connections.remove(conn)
-    if not connections:
-        del active_connections[user_id]
-
