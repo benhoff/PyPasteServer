@@ -373,33 +373,24 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
     try:
         # Send initial clipboard content
-        db = SessionLocal()
-        clipboard = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
-        db.close()
-        initial_text = clipboard.text if clipboard else ""
-        await websocket.send_json({"type": "init", "text": initial_text})
+        # db = SessionLocal()
+        # clipboard = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
+        # db.close()
+        # initial_text = clipboard.text if clipboard else ""
+        # await websocket.send_json({"type": "init", "text": initial_text})
 
         while True:
             # Receive the incoming message
-            data = await websocket.receive_text()
+            data = await websocket.receive_json()
+            print(data)
             # Here, you can define how to handle incoming messages.
             # For example, updating the clipboard or handling specific commands.
 
             # For demonstration, let's assume incoming messages are clipboard updates
             # Update the clipboard in the database
-            db = SessionLocal()
-            clipboard_entry = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
-            if not clipboard_entry:
-                clipboard_entry = Clipboard(text=data, owner_id=user.id)
-                db.add(clipboard_entry)
-            else:
-                clipboard_entry.text = data
-            db.commit()
-            db.refresh(clipboard_entry)
-            db.close()
 
             # Broadcast the updated content to all connected websockets for this user
-            await manager.broadcast(user.id, {"type": "update", "text": clipboard_entry.text})
+            await manager.broadcast(user.id, data)
 
     except WebSocketDisconnect:
         await manager.disconnect(user.id, websocket)
