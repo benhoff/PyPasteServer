@@ -10,23 +10,66 @@ import argparse
 import configparser
 import os
 
+# Define default configuration content
+DEFAULT_CONFIG_CONTENT = """; This is a sample configuration file for the clipboard application
 
-def load_config():
+[Paths]
+token_file = ~/.config/clipboard_app/token.json
+enc_key_file = ~/.config/clipboard_app/key
+
+[Server]
+url = http://127.0.0.1:8001
+
+[Encryption]
+nonce_size = 24
+
+[Logging]
+log_level = INFO
+"""
+
+def create_default_config(config_path):
+    """
+    Creates a default configuration file at the specified path.
+    
+    Args:
+        config_path (Path): The path where the config file will be created.
+    """
+    try:
+        config_dir = config_path.parent
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with open(config_path, 'w') as config_file:
+            config_file.write(DEFAULT_CONFIG_CONTENT)
+        print(f"Default configuration file created at {config_path}.")
+    except IOError as e:
+        print(f"Failed to create default configuration file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def load_config(create_if_missing=False):
     """
     Loads the configuration from the config.ini file.
-
+    If create_if_missing is True and the config file doesn't exist,
+    creates the config file with default settings.
+    
+    Args:
+        create_if_missing (bool): Whether to create the config file if it's missing.
+    
     Returns:
         configparser.ConfigParser: The loaded configuration.
-
+    
     Exits:
-        If the configuration file is missing or invalid.
+        If the configuration file is missing and create_if_missing is False,
+        or if the file is invalid.
     """
     config = configparser.ConfigParser()
-    config_path = os.path.expanduser("~/.config/clipboard_app/config.ini")
+    config_path = Path(os.path.expanduser("~/.config/clipboard_app/config.ini"))
 
-    if not os.path.exists(config_path):
-        print(f"Configuration file not found at {config_path}.", file=sys.stderr)
-        sys.exit(1)
+    if not config_path.exists():
+        if create_if_missing:
+            print(f"Configuration file not found at {config_path}. Creating default configuration.")
+            create_default_config(config_path)
+        else:
+            print(f"Configuration file not found at {config_path}.", file=sys.stderr)
+            sys.exit(1)
 
     try:
         config.read(config_path)
@@ -36,8 +79,8 @@ def load_config():
         sys.exit(1)
 
 
-# Load configuration
-config = load_config()
+# Load configuration (without creating it by default)
+config = load_config(create_if_missing=False)
 
 # Extract configuration values
 SERVER_URL = config.get('Server', 'url', fallback="http://127.0.0.1:8001")
@@ -312,12 +355,26 @@ def register_command(args):
     """
     Handle the register command.
     """
+    # Check if config file exists; if not, create it with default values
+    config_path = Path(os.path.expanduser("~/.config/clipboard_app/config.ini"))
+    if not config_path.exists():
+        print(f"Configuration file not found at {config_path}. Creating default configuration.")
+        create_default_config(config_path)
+    
+    # Reload the configuration after creating it
+    config = load_config(create_if_missing=False)
+
+    # Update SERVER_URL, TOKEN_FILE, and KEY_FILE based on the (possibly new) config
+    server_url = config.get('Server', 'url', fallback="http://127.0.0.1:8001")
+    token_file = Path(os.path.expanduser(config.get('Paths', 'token_file', fallback="~/.config/clipboard_app/token.json")))
+    key_file = Path(os.path.expanduser(config.get('Paths', 'enc_key_file', fallback="~/.config/clipboard_app/key")))
+
     user_data = prompt_user_details()
     
     # Register the user
     try:
         print("\nRegistering user...")
-        token = register_user(args.server, user_data)
+        token = register_user(server_url, user_data)
         print("Registration successful.")
     except ValueError as ve:
         print(f"Error: {ve}")
@@ -342,7 +399,8 @@ def register_command(args):
     entropy = mnemo.to_entropy(mnemonic)
 
     try:
-        with open(args.key_file, 'wb') as file:
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(key_file, 'wb') as file:
             file.write(entropy)
         print("Mnemonic saved successfully.")
     except IOError as ioe:
@@ -351,14 +409,14 @@ def register_command(args):
     
     # Save the access token
     try:
-        save_json_data({"access_token": token}, args.token_file)
+        save_json_data({"access_token": token}, token_file)
     except IOError as ioe:
         print(f"Error: {ioe}")
         sys.exit(1)
     
     print("\nRegistration and key generation complete.")
-    print(f"Access Token saved to: {args.token_file}")
-    print(f"Byte-Based Key saved to: {args.key_file}")
+    print(f"Access Token saved to: {token_file}")
+    print(f"Byte-Based Key saved to: {key_file}")
 
 
 def login_command(args):
