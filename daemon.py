@@ -18,31 +18,47 @@ import base64
 import configparser
 from pathlib import Path
 
+# Define default configuration values
+DEFAULT_CONFIG = {
+    'Paths': {
+        'token_file': '~/.config/clipboard_app/token.json',
+        'enc_key_file': '~/.config/clipboard_app/key'
+    },
+    'Server': {
+        'url': 'https://default.server.com'
+    },
+    'Encryption': {
+        'nonce_size': '24'
+    },
+    'Retry': {
+        'max_retries': '5'
+    }
+}
+
 # Load Configuration
 def load_config():
     """
     Loads the configuration from the config.ini file.
+    If the configuration file is missing or invalid, defaults are used.
     
     Returns:
-        configparser.ConfigParser: The loaded configuration.
-    
-    Exits:
-        If the configuration file is missing or invalid.
+        configparser.ConfigParser: The loaded or default configuration.
     """
     config = configparser.ConfigParser()
+    config.read_dict(DEFAULT_CONFIG)  # Load defaults first
     config_path = os.path.expanduser("~/.config/clipboard_app/config.ini")
     
-    if not os.path.exists(config_path):
-        print(f"Configuration file not found at {config_path}.", file=sys.stderr)
-        sys.exit(1)
+    if os.path.exists(config_path):
+        try:
+            config.read(config_path)
+            print(f"Configuration loaded from {config_path}.")
+        except configparser.Error as e:
+            print(f"Error parsing configuration file: {e}", file=sys.stderr)
+            print("Using default configuration values.", file=sys.stderr)
+    else:
+        print(f"Configuration file not found at {config_path}. Using default configuration.", file=sys.stderr)
     
-    try:
-        config.read(config_path)
-        return config
-    except configparser.Error as e:
-        print(f"Error parsing configuration file: {e}", file=sys.stderr)
-        sys.exit(1)
-
+    return config
 
 def strip_http_prefix(url):
     """
@@ -60,15 +76,14 @@ def strip_http_prefix(url):
         return url[len("https://"):]
     return url
 
-
 config = load_config()
 
-# Extract configuration values
-TOKEN_FILE = os.path.expanduser(config.get('Paths', 'token_file'))
-ENC_KEY_FILE = os.path.expanduser(config.get('Paths', 'enc_key_file'))
-SERVER_URL = strip_http_prefix(config.get('Server', 'url'))
-NONCE_SIZE = config.getint('Encryption', 'nonce_size')
-MAX_RETRIES = config.getint('Retry', 'max_retries', fallback=5)
+# Extract configuration values with fallbacks
+TOKEN_FILE = os.path.expanduser(config.get('Paths', 'token_file', fallback=DEFAULT_CONFIG['Paths']['token_file']))
+ENC_KEY_FILE = os.path.expanduser(config.get('Paths', 'enc_key_file', fallback=DEFAULT_CONFIG['Paths']['enc_key_file']))
+SERVER_URL = strip_http_prefix(config.get('Server', 'url', fallback=DEFAULT_CONFIG['Server']['url']))
+NONCE_SIZE = config.getint('Encryption', 'nonce_size', fallback=int(DEFAULT_CONFIG['Encryption']['nonce_size']))
+MAX_RETRIES = config.getint('Retry', 'max_retries', fallback=int(DEFAULT_CONFIG['Retry']['max_retries']))
 
 # Optional: Logging setup based on config (if you decide to implement logging)
 # import logging
@@ -466,6 +481,7 @@ def main():
             klipper_proxy = bus.get_object("org.kde.klipper", "/klipper")
         except dbus.DBusException:
             klipper_present = False
+            print("Klipper not found. Continuing without D-Bus clipboard integration.", file=sys.stderr)
        
         if klipper_present:
             # Get the Klipper interface
