@@ -9,14 +9,29 @@ from gi.repository import GLib
 import errno
 import json
 import threading
-import websocket
 import time
-from getpass import getpass
-from Crypto.Cipher import ChaCha20_Poly1305
-from Crypto.Random import get_random_bytes
-import base64
 import configparser
 from pathlib import Path
+
+# Attempt to import Crypto libraries
+try:
+    from Crypto.Cipher import ChaCha20_Poly1305
+    from Crypto.Random import get_random_bytes
+    import base64
+    ENCRYPTION_AVAILABLE = True
+except ImportError:
+    print("Crypto library not found. WebSocket synchronization will be disabled. "
+          "Install 'pycryptodome' to enable encryption and WebSocket features.", file=sys.stderr)
+    ENCRYPTION_AVAILABLE = False
+
+# Attempt to import websocket library if encryption is available
+if ENCRYPTION_AVAILABLE:
+    try:
+        import websocket
+    except ImportError:
+        print("WebSocket library not found. WebSocket synchronization will be disabled. "
+              "Install 'websocket-client' to enable WebSocket features.", file=sys.stderr)
+        ENCRYPTION_AVAILABLE = False
 
 # Define default configuration values
 DEFAULT_CONFIG = {
@@ -28,7 +43,7 @@ DEFAULT_CONFIG = {
         'url': 'https://default.server.com'
     },
     'Encryption': {
-        'nonce_size': '24'
+        'nonce_size': '23'
     },
     'Retry': {
         'max_retries': '5'
@@ -97,33 +112,96 @@ clipboard_fd = None
 ws = None
 stop_event = threading.Event()
 
-# Load Encryption Key
-def load_encryption_key():
-    """
-    Loads the encryption key from the ENC_KEY_FILE.
+# Load Encryption Key if encryption is available
+if ENCRYPTION_AVAILABLE:
+    def load_encryption_key():
+        """
+        Loads the encryption key from the ENC_KEY_FILE.
+        
+        Returns:
+            bytes: The 32-byte encryption key.
+        
+        Exits:
+            If the key file is missing or invalid.
+        """
+        try:
+            with open(ENC_KEY_FILE, 'rb') as f:
+                key = f.read()
+                if len(key) != 32:
+                    print(f"Invalid encryption key length in {ENC_KEY_FILE}. Expected 32 bytes.", file=sys.stderr)
+                    sys.exit(1)
+                return key
+        except FileNotFoundError:
+            print(f"Encryption key file not found at {ENC_KEY_FILE}.", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error loading encryption key: {e}", file=sys.stderr)
+            sys.exit(1)
     
-    Returns:
-        bytes: The 32-byte encryption key.
-    
-    Exits:
-        If the key file is missing or invalid.
-    """
-    try:
-        with open(ENC_KEY_FILE, 'rb') as f:
-            key = f.read()
-            if len(key) != 32:
-                print(f"Invalid encryption key length in {ENC_KEY_FILE}. Expected 32 bytes.", file=sys.stderr)
-                sys.exit(1)
-            return key
-    except FileNotFoundError:
-        print(f"Encryption key file not found at {ENC_KEY_FILE}.", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error loading encryption key: {e}", file=sys.stderr)
-        sys.exit(1)
+    ENC_KEY = load_encryption_key()
+    cipher = ChaCha20_Poly1305.new(key=ENC_KEY)
 
-ENC_KEY = load_encryption_key()
-cipher = ChaCha20_Poly1305.new(key=ENC_KEY)
+    def encrypt_message(message: str) -> dict:
+        """
+        Encrypts a plaintext message using ChaCha20-Poly1305.
+        
+        Args:
+            message (str): The plaintext message to encrypt.
+        
+        Returns:
+            dict: A dictionary containing Base64-encoded nonce and ciphertext.
+        """
+        nonce = get_random_bytes(NONCE_SIZE)  # Use nonce size from config
+        cipher = ChaCha20_Poly1305.new(key=ENC_KEY, nonce=nonce)
+        ciphertext, tag = cipher.encrypt_and_digest(message.encode())
+        return {
+            "nonce": base64.b64encode(nonce).decode(),
+            "ciphertext": base64.b64encode(ciphertext).decode(),
+            "tag": base64.b64encode(tag).decode()
+        }
+
+    def decrypt_message(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
+        """
+        Decrypts a ciphertext message using ChaCha20-Poly1305.
+        
+        Args:
+            nonce_b64 (str): Base64-encoded nonce.
+            ciphertext_b64 (str): Base64-encoded ciphertext.
+            tag_b64 (str): Base64-encoded authentication tag.
+        
+        Returns:
+            str: The decrypted plaintext message.
+        
+        Raises:
+            ValueError: If decryption fails.
+        """
+        try:
+            nonce = base64.b64decode(nonce_b64)
+            ciphertext = base64.b64decode(ciphertext_b64)
+            tag = base64.b64decode(tag_b64)
+            cipher = ChaCha20_Poly1305.new(key=ENC_KEY, nonce=nonce)
+            plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+            return plaintext.decode()
+        except (ValueError, KeyError) as e:
+            print(f"Decryption failed: {e}", file=sys.stderr)
+            return ""
+else:
+    # Define dummy encryption functions
+    def encrypt_message(message: str) -> dict:
+        """
+        Dummy encryption function when encryption is not available.
+        """
+        return {
+            "nonce": "",
+            "ciphertext": message,
+            "tag": ""
+        }
+
+    def decrypt_message(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
+        """
+        Dummy decryption function when encryption is not available.
+        """
+        return ciphertext_b64  # Return ciphertext as plaintext
 
 def read_all(fd, retry_count=MAX_RETRIES):
     """
@@ -196,8 +274,9 @@ def process_read_data(data):
                 klipper.setClipboardContents(data)
             except dbus.DBusException as e:
                 print(f"Error setting clipboard contents in Klipper: {e}", file=sys.stderr)
-        # Send the updated clipboard content to the server
-        send_clipboard_update(data)
+        # Send the updated clipboard content to the server if encryption and WebSocket are available
+        if ENCRYPTION_AVAILABLE:
+            send_clipboard_update(data)
 
 def on_clipboard_history_updated():
     """
@@ -212,8 +291,9 @@ def on_clipboard_history_updated():
         print(f"Clipboard Updated (D-Bus): {clipboard_content}")
         CLIPBOARD_HISTORY = clipboard_content
         klipper.setClipboardContents(clipboard_content)
-        # Send the updated clipboard content to the server
-        send_clipboard_update(clipboard_content)
+        # Send the updated clipboard content to the server if encryption and WebSocket are available
+        if ENCRYPTION_AVAILABLE:
+            send_clipboard_update(clipboard_content)
     except dbus.DBusException as e:
         print(f"Error retrieving clipboard contents: {e}", file=sys.stderr)
 
@@ -235,8 +315,9 @@ def sigio_handler(signum, frame):
                 CLIPBOARD_HISTORY = data
                 if klipper:
                     klipper.setClipboardContents(data)
-                # Send the updated clipboard content to the server
-                send_clipboard_update(data)
+                # Send the updated clipboard content to the server if encryption and WebSocket are available
+                if ENCRYPTION_AVAILABLE:
+                    send_clipboard_update(data)
         except OSError as e:
             print(f"Error reading /dev/clipboard: {e}", file=sys.stderr)
 
@@ -262,8 +343,9 @@ def on_clipboard_device_ready(source, condition):
                 CLIPBOARD_HISTORY = data
                 # Update Klipper's clipboard contents via D-Bus
                 klipper.setClipboardContents(data)
-                # Send the updated clipboard content to the server
-                send_clipboard_update(data)
+                # Send the updated clipboard content to the server if encryption and WebSocket are available
+                if ENCRYPTION_AVAILABLE:
+                    send_clipboard_update(data)
         except OSError as e:
             print(f"Error reading /dev/clipboard: {e}", file=sys.stderr)
         except dbus.DBusException as e:
@@ -315,51 +397,6 @@ def load_token():
         print(f"Token file {TOKEN_FILE} is not valid JSON.", file=sys.stderr)
         sys.exit(1)
 
-def encrypt_message(message: str) -> dict:
-    """
-    Encrypts a plaintext message using ChaCha20-Poly1305.
-    
-    Args:
-        message (str): The plaintext message to encrypt.
-    
-    Returns:
-        dict: A dictionary containing Base64-encoded nonce and ciphertext.
-    """
-    nonce = get_random_bytes(NONCE_SIZE)  # Use nonce size from config
-    cipher = ChaCha20_Poly1305.new(key=ENC_KEY, nonce=nonce)
-    ciphertext, tag = cipher.encrypt_and_digest(message.encode())
-    return {
-        "nonce": base64.b64encode(nonce).decode(),
-        "ciphertext": base64.b64encode(ciphertext).decode(),
-        "tag": base64.b64encode(tag).decode()
-    }
-
-def decrypt_message(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
-    """
-    Decrypts a ciphertext message using ChaCha20-Poly1305.
-    
-    Args:
-        nonce_b64 (str): Base64-encoded nonce.
-        ciphertext_b64 (str): Base64-encoded ciphertext.
-        tag_b64 (str): Base64-encoded authentication tag.
-    
-    Returns:
-        str: The decrypted plaintext message.
-    
-    Raises:
-        ValueError: If decryption fails.
-    """
-    try:
-        nonce = base64.b64decode(nonce_b64)
-        ciphertext = base64.b64decode(ciphertext_b64)
-        tag = base64.b64decode(tag_b64)
-        cipher = ChaCha20_Poly1305.new(key=ENC_KEY, nonce=nonce)
-        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-        return plaintext.decode()
-    except (ValueError, KeyError) as e:
-        print(f"Decryption failed: {e}", file=sys.stderr)
-        return ""
-
 def send_clipboard_update(text):
     """
     Sends the encrypted clipboard update to the server via WebSocket.
@@ -368,7 +405,7 @@ def send_clipboard_update(text):
         text (str): The clipboard text to send.
     """
     global ws
-    if ws and ws.sock and ws.sock.connected:
+    if ENCRYPTION_AVAILABLE and ws and ws.sock and ws.sock.connected:
         try:
             encrypted_message = encrypt_message(text)
             message = json.dumps({
@@ -452,9 +489,12 @@ def on_clipboard_history_updated_threaded():
 
 def start_websocket_client():
     """
-    Initializes and starts the WebSocket client thread.
+    Initializes and starts the WebSocket client thread if encryption is available.
     """
-    start_websocket()
+    if ENCRYPTION_AVAILABLE:
+        start_websocket()
+    else:
+        print("WebSocket client not started because encryption is unavailable.", file=sys.stderr)
 
 def setup_websocket_callbacks():
     """
@@ -464,7 +504,7 @@ def setup_websocket_callbacks():
 
 def main():
     """
-    Main function to set up D-Bus connections, signal receivers, WebSocket connection, and the GLib main loop.
+    Main function to set up D-Bus connections, signal receivers, WebSocket connection (if available), and the GLib main loop.
     """
     global klipper
     # Initialize the main D-Bus loop integration with GLib
@@ -481,7 +521,6 @@ def main():
             klipper_proxy = bus.get_object("org.kde.klipper", "/klipper")
         except dbus.DBusException:
             klipper_present = False
-            print("Klipper not found. Continuing without D-Bus clipboard integration.", file=sys.stderr)
        
         if klipper_present:
             # Get the Klipper interface
@@ -494,14 +533,20 @@ def main():
                 dbus_interface="org.kde.klipper.klipper",
                 path="/klipper"
             )
-        
+        else:
+            print("Klipper D-Bus interface not found. Clipboard synchronization via D-Bus is disabled.", file=sys.stderr)
+    
         # Set up asynchronous monitoring of /dev/clipboard
         setup_clipboard_device()
 
-        # Start WebSocket connection
+        # Start WebSocket connection if encryption is available
         start_websocket_client()
 
-        print("Listening for clipboard changes (D-Bus and /dev/clipboard) and syncing via WebSocket.")
+        print("Listening for clipboard changes (D-Bus and /dev/clipboard).")
+        if ENCRYPTION_AVAILABLE:
+            print("WebSocket synchronization is enabled.")
+        else:
+            print("WebSocket synchronization is disabled.")
         print("Press Ctrl+C to exit.")
         loop.run()
     except dbus.DBusException as e:
