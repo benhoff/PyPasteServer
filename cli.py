@@ -136,7 +136,7 @@ def login_user(server_url, username, password):
         raise ConnectionError(f"Failed to connect to the server: {e}")
 
 
-def logout_user(token_file, key_file):
+def logout_user(token_file):
     """
     Log out the user by deleting the stored token and key files.
     """
@@ -146,12 +146,6 @@ def logout_user(token_file, key_file):
             print(f"Access token '{token_file}' deleted successfully.")
         else:
             print(f"No access token found at '{token_file}'.")
-        
-        if key_file.exists():
-            key_file.unlink()
-            print(f"Encryption key '{key_file}' deleted successfully.")
-        else:
-            print(f"No encryption key found at '{key_file}'.")
         
     except Exception as e:
         raise IOError(f"Failed to delete files: {e}")
@@ -440,7 +434,7 @@ def logout_command(args):
     Handle the logout command.
     """
     try:
-        logout_user(args.token_file, args.key_file)  # Pass key_file argument
+        logout_user(args.token_file)
         print("Logout successful.")
     except IOError as ioe:
         print(f"Error: {ioe}")
