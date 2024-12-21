@@ -1,0 +1,34 @@
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fastapi_app
+    volumes:
+      - ./clipboard.db:/app/clipboard.db
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=sqlite:///./clipboard.db
+      - JWT_SECRET=supersecretkey
+      - JWT_ALGORITHM=HS256
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - app_network
+
+  redis:
+    image: "redis:7"
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge
+

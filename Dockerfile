@@ -15,15 +15,21 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY app/requirements.txt .
+COPY high-level-server-requirements.txt requirements.txt
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the application code
-COPY app/ /app/
+COPY . /app/
+
+# Copy initial clipboard.db if it exists
+COPY clipboard.db /app/clipboard.db
+
+# Declare a volume for the data directory
+VOLUME ["/app"]
 
 # Expose the port FastAPI is running on
-EXPOSE 8000
+EXPOSE 8001
 
 # Command to run the FastAPI application with Gunicorn and Uvicorn workers
-CMD ["gunicorn", "main:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "4"]
+CMD ["gunicorn", "server:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8001", "--workers", "4"]
