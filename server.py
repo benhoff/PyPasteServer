@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel, EmailStr
 import uuid
 import json
+import aioredis
 
 # ####################
 # Configuration
@@ -19,6 +20,9 @@ import json
 DATABASE_URL = "sqlite:///./clipboard.db"
 JWT_SECRET = "supersecretkey"  # In production, use a secure, random key from environment variables
 JWT_ALGORITHM = "HS256"
+
+# Redis configuration
+REDIS_URL = "redis://localhost:6379"  # Update as needed
 
 # Initialize SQLAlchemy
 engine = create_engine(
@@ -29,6 +33,9 @@ Base = declarative_base()  # Updated import path
 
 # Initialize Passlib for password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Initialize Redis
+redis = aioredis.from_url(REDIS_URL, decode_responses=True)
 
 # #################
 # Database Models
@@ -51,7 +58,9 @@ class Clipboard(Base):
     __tablename__ = "clipboards"
 
     id = Column(Integer, primary_key=True, index=True)
-    text = Column(Text, nullable=False)
+    ciphertext = Column(Text, nullable=False)  # Encrypted text
+    nonce = Column(String(255), nullable=False)  # Nonce for decryption
+    tag = Column(String(255), nullable=False)    # Authentication tag
     owner_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
 
     owner = relationship("User", back_populates="clipboard")
@@ -82,10 +91,17 @@ class UserCreate(BaseModel):
     email: EmailStr  # Ensures valid email format
 
 class ClipboardCreate(BaseModel):
-    text: str
+    ciphertext: str
+    nonce: str
+    tag: str
 
 class ClipboardResponse(BaseModel):
-    text: str
+    ciphertext: str
+    nonce: str
+    tag: str
+
+    class Config:
+        orm_mode = True
 
 class TokenSchema(BaseModel):
     access_token: str
@@ -158,22 +174,86 @@ def get_current_user(token: Optional[str] = Header(None), db: Session = Depends(
 
 def initialize_user_clipboard(db: Session, user: User):
     """
-    Initializes a clipboard for a newly registered user.
+    Initializes a clipboard for a newly registered user with default encrypted content.
     """
-    clipboard = Clipboard(text="Initial Clipboard Content", owner_id=user.id)
+    # Example: Initialize with empty encrypted fields or some default encrypted content
+    # Here, we'll initialize with empty strings. Adjust as needed.
+    clipboard = Clipboard(ciphertext="", nonce="", tag="", owner_id=user.id)
     db.add(clipboard)
     db.commit()
     db.refresh(clipboard)
 
 # #################
-# Connection Manager
+# Connection Manager with Redis Pub/Sub and Connection Counting
 # #################
 
 class ConnectionManager:
     def __init__(self):
-        # Maps user_id to a set of WebSocket connections
+        # Maps user_id to a set of WebSocket connections (local to the worker)
         self.active_connections: Dict[int, List[WebSocket]] = {}
         self.lock = asyncio.Lock()
+        self.pubsub = None
+        self.redis_sub = None
+
+    async def connect_redis(self):
+        """
+        Connect to Redis and subscribe to the clipboard_updates channel.
+        """
+        self.pubsub = redis.pubsub()
+        await self.pubsub.subscribe("clipboard_updates")
+        self.redis_sub = self.pubsub
+
+    async def listen_redis(self):
+        """
+        Listen for messages from Redis and broadcast them to local WebSockets.
+        """
+        async for message in self.pubsub.listen():
+            if message["type"] == "message":
+                data = json.loads(message["data"])
+                user_id = data.get("user_id")
+                ciphertext = data.get("ciphertext")
+                nonce = data.get("nonce")
+                tag = data.get("tag")
+                if user_id and ciphertext and nonce and tag:
+                    update_message = {
+                        "type": "update",
+                        "ciphertext": ciphertext,
+                        "nonce": nonce,
+                        "tag": tag
+                    }
+                    await self.broadcast(user_id, update_message)
+
+    async def start_listening(self):
+        """
+        Start the Redis listener in the background.
+        """
+        await self.connect_redis()
+        asyncio.create_task(self.listen_redis())
+
+    async def increment_connection_count(self, user_id: int):
+        """
+        Increment the Redis counter for the user's active connections.
+        """
+        key = f"user:{user_id}:connections"
+        await redis.incr(key)
+
+    async def decrement_connection_count(self, user_id: int):
+        """
+        Decrement the Redis counter for the user's active connections.
+        """
+        key = f"user:{user_id}:connections"
+        # Use DECR only if the key exists to prevent negative counts
+        current = await redis.decr(key)
+        if current < 0:
+            await redis.set(key, 0)
+
+    async def get_connection_count(self, user_id: int) -> int:
+        """
+        Retrieve the current connection count for the user from Redis.
+        """
+        key = f"user:{user_id}:connections"
+        count = await redis.get(key)
+        return int(count) if count else 0
 
     async def connect(self, user_id: int, websocket: WebSocket):
         await websocket.accept()
@@ -181,14 +261,18 @@ class ConnectionManager:
             if user_id not in self.active_connections:
                 self.active_connections[user_id] = []
             self.active_connections[user_id].append(websocket)
-        print(f"User {user_id} connected. Total connections: {len(self.active_connections[user_id])}")
+        await self.increment_connection_count(user_id)
+        total_connections = await self.get_connection_count(user_id)
+        print(f"User {user_id} connected. Total connections: {total_connections}")
 
     async def disconnect(self, user_id: int, websocket: WebSocket):
         async with self.lock:
             if user_id in self.active_connections:
                 if websocket in self.active_connections[user_id]:
                     self.active_connections[user_id].remove(websocket)
-                    print(f"User {user_id} disconnected. Remaining connections: {len(self.active_connections[user_id])}")
+                    await self.decrement_connection_count(user_id)
+                    total_connections = await self.get_connection_count(user_id)
+                    print(f"User {user_id} disconnected. Remaining connections: {total_connections}")
                 if not self.active_connections[user_id]:
                     del self.active_connections[user_id]
 
@@ -210,8 +294,18 @@ class ConnectionManager:
                 for conn in to_remove:
                     if conn in self.active_connections.get(user_id, []):
                         self.active_connections[user_id].remove(conn)
-                if not self.active_connections[user_id]:
+                        await self.decrement_connection_count(user_id)
+                        total_connections = await self.get_connection_count(user_id)
+                        print(f"User {user_id} connection removed due to error. Remaining connections: {total_connections}")
+                if user_id in self.active_connections and not self.active_connections[user_id]:
                     del self.active_connections[user_id]
+
+    async def publish_update(self, user_id: int, message: dict):
+        """
+        Publish an encrypted update to Redis to notify all workers.
+        """
+        message_json = json.dumps(message)
+        await redis.publish("clipboard_updates", message_json)
 
 # Initialize the ConnectionManager
 manager = ConnectionManager()
@@ -227,9 +321,13 @@ async def lifespan(app: FastAPI):
     """
     Handles the application lifespan events: startup and shutdown.
     """
-    # Startup tasks (if any)
+    # Startup tasks
+    await manager.start_listening()
     yield
-    # Shutdown tasks (if any)
+    # Shutdown tasks
+    await manager.pubsub.unsubscribe("clipboard_updates")
+    await manager.pubsub.close()
+    await redis.close()
 
 # Assign the lifespan handler to the FastAPI app
 app.router.lifespan_context = lifespan
@@ -311,7 +409,11 @@ def get_clipboard(current_user: User = Depends(get_current_user), db: Session = 
     clipboard = db.query(Clipboard).filter(Clipboard.owner_id == current_user.id).first()
     if not clipboard:
         raise HTTPException(status_code=404, detail="Clipboard not found")
-    return {"text": clipboard.text}
+    return ClipboardResponse(
+        ciphertext=clipboard.ciphertext,
+        nonce=clipboard.nonce,
+        tag=clipboard.tag
+    )
 
 @app.post("/clipboard", response_model=ClipboardResponse)
 def update_clipboard(
@@ -321,18 +423,36 @@ def update_clipboard(
 ):
     clipboard_entry = db.query(Clipboard).filter(Clipboard.owner_id == current_user.id).first()
     if not clipboard_entry:
-        # This should not happen as clipboard is initialized on registration
-        clipboard_entry = Clipboard(text=clipboard.text, owner_id=current_user.id)
+        # Initialize clipboard if it doesn't exist
+        clipboard_entry = Clipboard(
+            ciphertext=clipboard.ciphertext,
+            nonce=clipboard.nonce,
+            tag=clipboard.tag,
+            owner_id=current_user.id
+        )
         db.add(clipboard_entry)
     else:
-        clipboard_entry.text = clipboard.text
+        # Update existing clipboard
+        clipboard_entry.ciphertext = clipboard.ciphertext
+        clipboard_entry.nonce = clipboard.nonce
+        clipboard_entry.tag = clipboard.tag
     db.commit()
     db.refresh(clipboard_entry)
 
-    # Broadcast the updated content to all connected websockets for this user
-    asyncio.create_task(manager.broadcast(current_user.id, {"type": "update", "text": clipboard_entry.text}))
+    # Publish the updated encrypted content to Redis to broadcast to all workers
+    message = {
+        "type": "update",
+        "ciphertext": clipboard_entry.ciphertext,
+        "nonce": clipboard_entry.nonce,
+        "tag": clipboard_entry.tag
+    }
+    asyncio.create_task(manager.publish_update(current_user.id, message))
 
-    return {"text": clipboard_entry.text}
+    return ClipboardResponse(
+        ciphertext=clipboard_entry.ciphertext,
+        nonce=clipboard_entry.nonce,
+        tag=clipboard_entry.tag
+    )
 
 # #################
 # WebSocket Handler
@@ -372,28 +492,73 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
     await manager.connect(user.id, websocket)
 
     try:
-        # Send initial clipboard content
-        # db = SessionLocal()
-        # clipboard = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
-        # db.close()
-        # initial_text = clipboard.text if clipboard else ""
-        # await websocket.send_json({"type": "init", "text": initial_text})
+        # Send initial encrypted clipboard content and connection count
+        db = SessionLocal()
+        clipboard = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
+        db.close()
+        if clipboard:
+            initial_message = {
+                "type": "init",
+                "ciphertext": clipboard.ciphertext,
+                "nonce": clipboard.nonce,
+                "tag": clipboard.tag,
+                "connection_count": await manager.get_connection_count(user.id)
+            }
+        else:
+            initial_message = {
+                "type": "init",
+                "ciphertext": "",
+                "nonce": "",
+                "tag": "",
+                "connection_count": await manager.get_connection_count(user.id)
+            }
+        await websocket.send_json(initial_message)
 
         while True:
-            # Receive the incoming message
+            # Receive the incoming encrypted message
             data = await websocket.receive_json()
             print(data)
-            # Here, you can define how to handle incoming messages.
-            # For example, updating the clipboard or handling specific commands.
+            # Expecting a message with type, ciphertext, nonce, and tag
 
-            # For demonstration, let's assume incoming messages are clipboard updates
-            # Update the clipboard in the database
+            if data.get("type") == "update":
+                ciphertext = data.get("ciphertext")
+                nonce = data.get("nonce")
+                tag = data.get("tag")
 
-            # Broadcast the updated content to all connected websockets for this user
-            await manager.broadcast(user.id, data)
+                if not all([ciphertext, nonce, tag]):
+                    # Invalid message format
+                    continue
+
+                """
+                # Update the clipboard in the database
+                clipboard_entry = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
+                if not clipboard_entry:
+                    clipboard_entry = Clipboard(
+                        ciphertext=ciphertext,
+                        nonce=nonce,
+                        tag=tag,
+                        owner_id=user.id
+                    )
+                    db.add(clipboard_entry)
+                else:
+                    clipboard_entry.ciphertext = ciphertext
+                    clipboard_entry.nonce = nonce
+                    clipboard_entry.tag = tag
+                db.commit()
+                db.refresh(clipboard_entry)
+                """
+                # Broadcast the encrypted update to all connected clients via Redis
+                message = {
+                    "type": "update",
+                    "ciphertext": clipboard_entry.ciphertext,
+                    "nonce": clipboard_entry.nonce,
+                    "tag": clipboard_entry.tag
+                }
+                asyncio.create_task(manager.publish_update(user.id, message))
 
     except WebSocketDisconnect:
         await manager.disconnect(user.id, websocket)
     except Exception as e:
         await manager.disconnect(user.id, websocket)
         print(f"WebSocket error for user {user.username}: {e}")
+
