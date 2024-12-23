@@ -208,7 +208,7 @@ class ConnectionManager:
         Listen for messages from Redis and broadcast them to local WebSockets.
         """
         async for message in self.pubsub.listen():
-            if message["type"] == "message":
+            if message["type"] == "update":
                 data = json.loads(message["data"])
                 user_id = data.get("user_id")
                 ciphertext = data.get("ciphertext")
