@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
         'url': 'https://default.server.com'
     },
     'Encryption': {
-        'nonce_size': '23'
+        'nonce_size': '24'
     },
     'Retry': {
         'max_retries': '5'
