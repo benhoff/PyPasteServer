@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel, EmailStr
 import uuid
 import json
-import aioredis
+import redis.asyncio as redis
 
 # ####################
 # Configuration
@@ -22,7 +22,7 @@ JWT_SECRET = "supersecretkey"  # In production, use a secure, random key from en
 JWT_ALGORITHM = "HS256"
 
 # Redis configuration
-REDIS_URL = "redis://localhost:6379"  # Update as needed
+REDIS_URL = "redis://redis:6379"  # Update as needed
 
 # Initialize SQLAlchemy
 engine = create_engine(
@@ -35,7 +35,7 @@ Base = declarative_base()  # Updated import path
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Initialize Redis
-redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 # #################
 # Database Models
@@ -199,7 +199,7 @@ class ConnectionManager:
         """
         Connect to Redis and subscribe to the clipboard_updates channel.
         """
-        self.pubsub = redis.pubsub()
+        self.pubsub = redis_client.pubsub()
         await self.pubsub.subscribe("clipboard_updates")
         self.redis_sub = self.pubsub
 
@@ -235,7 +235,7 @@ class ConnectionManager:
         Increment the Redis counter for the user's active connections.
         """
         key = f"user:{user_id}:connections"
-        await redis.incr(key)
+        await redis_client.incr(key)
 
     async def decrement_connection_count(self, user_id: int):
         """
@@ -243,16 +243,16 @@ class ConnectionManager:
         """
         key = f"user:{user_id}:connections"
         # Use DECR only if the key exists to prevent negative counts
-        current = await redis.decr(key)
+        current = await redis_client.decr(key)
         if current < 0:
-            await redis.set(key, 0)
+            await redis_client.set(key, 0)
 
     async def get_connection_count(self, user_id: int) -> int:
         """
         Retrieve the current connection count for the user from Redis.
         """
         key = f"user:{user_id}:connections"
-        count = await redis.get(key)
+        count = await redis_client.get(key)
         return int(count) if count else 0
 
     async def connect(self, user_id: int, websocket: WebSocket):
@@ -305,7 +305,7 @@ class ConnectionManager:
         Publish an encrypted update to Redis to notify all workers.
         """
         message_json = json.dumps(message)
-        await redis.publish("clipboard_updates", message_json)
+        await redis_client.publish("clipboard_updates", message_json)
 
 # Initialize the ConnectionManager
 manager = ConnectionManager()
@@ -327,7 +327,7 @@ async def lifespan(app: FastAPI):
     # Shutdown tasks
     await manager.pubsub.unsubscribe("clipboard_updates")
     await manager.pubsub.close()
-    await redis.close()
+    await redis_client.close()
 
 # Assign the lifespan handler to the FastAPI app
 app.router.lifespan_context = lifespan
