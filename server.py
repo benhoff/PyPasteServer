@@ -551,9 +551,9 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 # Broadcast the encrypted update to all connected clients via Redis
                 message = {
                     "type": "update",
-                    "ciphertext": clipboard_entry.ciphertext,
-                    "nonce": clipboard_entry.nonce,
-                    "tag": clipboard_entry.tag
+                    "ciphertext": ciphertext,
+                    "nonce": nonce,
+                    "tag": tag
                 }
                 asyncio.create_task(manager.publish_update(user.id, message))
 
