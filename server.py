@@ -79,7 +79,7 @@ class Token(Base):
 
 
 # Create all tables
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
 
 # #################
 # Pydantic Schemas
@@ -321,6 +321,7 @@ async def lifespan(app: FastAPI):
     """
     Handles the application lifespan events: startup and shutdown.
     """
+    Base.metadata.create_all(bind=engine)
     # Startup tasks
     await manager.start_listening()
     yield
