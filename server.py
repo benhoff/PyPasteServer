@@ -208,7 +208,7 @@ class ConnectionManager:
         Listen for messages from Redis and broadcast them to local WebSockets.
         """
         async for message in self.pubsub.listen():
-            if message["type"] == "update":
+            if message["type"] == "message":
                 data = json.loads(message["data"])
                 user_id = data.get("user_id")
                 ciphertext = data.get("ciphertext")
@@ -300,7 +300,7 @@ class ConnectionManager:
                 if user_id in self.active_connections and not self.active_connections[user_id]:
                     del self.active_connections[user_id]
 
-    async def publish_update(self, user_id: int, message: dict):
+    async def publish_update(self, message: dict):
         """
         Publish an encrypted update to Redis to notify all workers.
         """
@@ -445,9 +445,10 @@ def update_clipboard(
         "type": "update",
         "ciphertext": clipboard_entry.ciphertext,
         "nonce": clipboard_entry.nonce,
-        "tag": clipboard_entry.tag
+        "tag": clipboard_entry.tag,
+        "user_id": current_user.id
     }
-    asyncio.create_task(manager.publish_update(current_user.id, message))
+    asyncio.create_task(manager.publish_update(message))
 
     return ClipboardResponse(
         ciphertext=clipboard_entry.ciphertext,
@@ -518,7 +519,6 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         while True:
             # Receive the incoming encrypted message
             data = await websocket.receive_json()
-            print(data)
             # Expecting a message with type, ciphertext, nonce, and tag
 
             if data.get("type") == "update":
@@ -553,9 +553,11 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     "type": "update",
                     "ciphertext": ciphertext,
                     "nonce": nonce,
-                    "tag": tag
+                    "tag": tag,
+                    "user_id": user.id
+
                 }
-                asyncio.create_task(manager.publish_update(user.id, message))
+                asyncio.create_task(manager.publish_update(message))
 
     except WebSocketDisconnect:
         await manager.disconnect(user.id, websocket)
