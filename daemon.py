@@ -6,6 +6,8 @@ import os
 import fcntl
 import signal
 from gi.repository import GLib
+import gi
+import gi._enum
 import errno
 import json
 import threading
