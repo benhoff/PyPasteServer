@@ -521,8 +521,14 @@ def main():
 
         # Start WebSocket connection if encryption is available
         start_websocket_client()
+        what_we = "Listening for clipboard changes "
+        if klipper_present and not device_enabled:
+            what_we += "(D-Bus)"
+        elif device_enabled and not klipper_present:
+            what_we += "(/dev/clipboard)"
+        elif klipper_present and device_enabled:
+            what_we += "(D-Bus and /dev/clipboard)"
 
-        print("Listening for clipboard changes (D-Bus and /dev/clipboard).")
         if ENCRYPTION_AVAILABLE:
             print("WebSocket synchronization is enabled.")
         else:
@@ -535,6 +541,8 @@ def main():
                 file=sys.stderr
             )
             sys.exit(1)
+
+        print(what_we)
         print("Press Ctrl+C to exit.")
         loop.run()
     except KeyboardInterrupt:
