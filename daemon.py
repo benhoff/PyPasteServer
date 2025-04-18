@@ -478,83 +478,85 @@ def setup_websocket_callbacks():
 
 def main():
     """
-    Main function to set up D-Bus connections, signal receivers, WebSocket connection (if available), and the GLib main loop.
+    Main function to set up D-Bus connections, signal receivers, WebSocket connection (if available),
+    and enforce that at least two synchronization methods are available before entering the main loop.
     """
     global klipper
     # Initialize the main D-Bus loop integration with GLib
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     loop = GLib.MainLoop()
 
+    # --- 1) D-Bus / Klipper setup ---
     klipper_present = True
     try:
-        # Connect to the session bus
         bus = dbus.SessionBus()
     except dbus.DBusException:
         klipper_present = False
-        print("D-Bus interface not found. Clipboard synchronization via D-Bus is disabled.", file=sys.stderr)
+        print(
+            "D-Bus interface not found. Clipboard synchronization via D-Bus is disabled.",
+            file=sys.stderr
+        )
 
     if klipper_present:
-        # Attempt to get the Klipper D-Bus object
         try:
             klipper_proxy = bus.get_object("org.kde.klipper", "/klipper")
-        except dbus.DBusException:
-            klipper_present = False
-       
-        if klipper_present:
-            # Get the Klipper interface
-            klipper = dbus.Interface(klipper_proxy, dbus_interface="org.kde.klipper.klipper")
-            
-            # Connect to the clipboardHistoryUpdated signal from Klipper D-Bus
+            klipper = dbus.Interface(
+                klipper_proxy,
+                dbus_interface="org.kde.klipper.klipper"
+            )
             bus.add_signal_receiver(
                 handler_function=on_clipboard_history_updated_threaded,
                 signal_name="clipboardHistoryUpdated",
                 dbus_interface="org.kde.klipper.klipper",
                 path="/klipper"
             )
-        else:
-            print("Klipper D-Bus interface not found. Clipboard synchronization via D-Bus is disabled.", file=sys.stderr)
+        except dbus.DBusException:
+            klipper_present = False
+            print(
+                "Klipper D-Bus interface not found. Clipboard synchronization via D-Bus is disabled.",
+                file=sys.stderr
+            )
 
     try:
-    
-        # Set up asynchronous monitoring of /dev/clipboard
+        # --- 2) /dev/clipboard device ---
         device_enabled = setup_clipboard_device()
 
-        # Start WebSocket connection if encryption is available
+        # --- 3) WebSocket client ---
         start_websocket_client()
-        what_we = "Listening for clipboard changes "
-        if klipper_present and not device_enabled:
-            what_we += "(D-Bus)"
-        elif device_enabled and not klipper_present:
-            what_we += "(/dev/clipboard)"
-        elif klipper_present and device_enabled:
-            what_we += "(D-Bus and /dev/clipboard)"
+        ws_enabled = ENCRYPTION_AVAILABLE
 
-        if ENCRYPTION_AVAILABLE:
-            print("WebSocket synchronization is enabled.")
-        else:
-            print("WebSocket synchronization is disabled.")
-
-        # TODO: I'm sure there are cases where encryption is available and we fail to setup websockets
-        if not (klipper_present or device_enabled or ENCRYPTION_AVAILABLE):
+        # --- 4) Ensure at least two methods are up ---
+        methods = {
+            "D-Bus": klipper_present,
+            "/dev/clipboard": device_enabled,
+            "WebSocket": ws_enabled
+        }
+        available = [name for name, ok in methods.items() if ok]
+        if len(available) < 2:
             print(
-                "All synchronization paths (D-Bus, /dev/clipboard, WebSocket) are disabled. Exiting.",
+                f"Error: Only {len(available)} synchronization method(s) available "
+                f"({', '.join(available) or 'none'}); at least two required. Exiting.",
                 file=sys.stderr
             )
             sys.exit(1)
 
-        print(what_we)
+        # --- 5) Everything’s OK: print summary and start loop ---
+        print("Synchronization methods enabled: " + ", ".join(available))
         print("Press Ctrl+C to exit.")
         loop.run()
+
     except KeyboardInterrupt:
         print("\nExiting.")
         stop_event.set()
         if ws:
             ws.close()
         loop.quit()
+
     finally:
-        # Clean up the file descriptor if it was opened
+        # Clean up the clipboard device file descriptor
         if clipboard_fd is not None:
             os.close(clipboard_fd)
+
 
 if __name__ == "__main__":
     main()

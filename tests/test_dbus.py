@@ -1,161 +1,85 @@
-import pytest
+# tests/test_dbus.py
 import sys
+import pytest
 from types import SimpleNamespace
 
-# Import the user's script (assuming it's named daemon.py)
 import daemon as app
 
-#
-# ─── Helpers for Main Tests ─────────────────────────────────────────────────────
-#
 class FakeLoop:
     def __init__(self, run_raises=None):
         self.run_raises = run_raises
         self.quit_called = False
-
     def run(self):
         if self.run_raises:
             raise self.run_raises
-
     def quit(self):
         self.quit_called = True
 
+@pytest.fixture(autouse=True)
+def stub_loop_and_ws(monkeypatch):
+    monkeypatch.setattr(app.GLib, "MainLoop", lambda: FakeLoop(run_raises=KeyboardInterrupt))
+    monkeypatch.setattr(app, "start_websocket_client", lambda: None)
+    return None
 
-#
-# ─── Test: D-Bus Unavailable ─────────────────────────────────────────────────────
-#
-def test_main_continues_when_dbus_unavailable(monkeypatch, capsys):
-    """
-    If dbus.SessionBus().get_object raises DBusException,
-    main() should catch it, print a warning, and continue to run.
-    """
-    # Stub SessionBus to raise on get_object
+def test_main_exits_if_two_methods_not_met(monkeypatch, capsys):
+    # WS disabled
+    monkeypatch.setattr(app, "ENCRYPTION_AVAILABLE", False)
+    # DBus ok
     class FakeBus:
-        def get_object(self, *args, **kwargs):
-            raise app.dbus.DBusException("No D-Bus")
+        def get_object(self, *a, **k): return SimpleNamespace()
+        def add_signal_receiver(self, *a, **k): pass
+    monkeypatch.setattr(app.dbus, "SessionBus", lambda *a, **k: FakeBus())
+    monkeypatch.setattr(app.dbus, "Interface", lambda proxy, **kwargs: proxy)
+    # Device disabled
+    monkeypatch.setattr(app, "setup_clipboard_device", lambda: False)
 
-    monkeypatch.setattr(app.dbus, "SessionBus", lambda: FakeBus())
+    with pytest.raises(SystemExit) as exc:
+        app.main()
+    out, err = capsys.readouterr()
+    # Only D-Bus is enabled here
+    assert "Only 1 synchronization method(s) available (D-Bus);" in err
+    assert exc.value.code == 1
 
-    # Stub GLib.MainLoop to exit immediately via KeyboardInterrupt
-    fake_loop = FakeLoop(run_raises=KeyboardInterrupt)
-    monkeypatch.setattr(app.GLib, "MainLoop", lambda: fake_loop)
+def test_main_continues_when_two_methods_available(monkeypatch, capsys):
+    # WS disabled
+    monkeypatch.setattr(app, "ENCRYPTION_AVAILABLE", False)
+    # DBus ok
+    class FakeBus2:
+        def get_object(self, *a, **k): return SimpleNamespace()
+        def add_signal_receiver(self, *a, **k): pass
+    monkeypatch.setattr(app.dbus, "SessionBus", lambda *a, **k: FakeBus2())
+    monkeypatch.setattr(app.dbus, "Interface", lambda proxy, **kwargs: proxy)
+    # Device enabled
+    monkeypatch.setattr(app, "setup_clipboard_device", lambda: True)
 
-    # Stub out device and websocket setup
-    monkeypatch.setattr(app, "setup_clipboard_device", lambda: None)
-    monkeypatch.setattr(app, "start_websocket_client", lambda: None)
+    exit_called = {"called": False}
+    monkeypatch.setattr(sys, "exit", lambda code=1: exit_called.__setitem__("called", True))
 
-    # Run main
-    app.main()
-
-    captured = capsys.readouterr()
-    assert "Klipper D-Bus interface not found. Clipboard synchronization via D-Bus is disabled." in captured.err
-    assert "Listening for clipboard changes" in captured.out
-    assert fake_loop.quit_called
-
-
-def test_sessionbus_exception_handled(monkeypatch, capsys):
-    """
-    Simulate dbus.SessionBus() throwing the X11‐display error.
-    main() should catch it, print the “disabled” message, and continue.
-    """
-    # 1) Stub SessionBus() to raise the specific D-Bus exception
-    msg = ("org.freedesktop.DBus.Error.NotSupported: "
-           "Unable to autolaunch a dbus-daemon without a $DISPLAY for X11")
-    exc = app.dbus.DBusException(msg)
-    monkeypatch.setattr(app.dbus, "SessionBus",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(exc))
-
-    # 2) Stub out GLib.MainLoop so we exit via KeyboardInterrupt
-    monkeypatch.setattr(app.GLib, "MainLoop",
-                        lambda: FakeLoop(run_raises=KeyboardInterrupt))
-    # 3) Stub out device and WS setup
-    monkeypatch.setattr(app, "setup_clipboard_device", lambda: None)
-    monkeypatch.setattr(app, "start_websocket_client", lambda: None)
-
-    # 4) Run and capture output
     app.main()
     out, err = capsys.readouterr()
-    print(out, err)
+    assert not exit_called["called"]
+    assert "Synchronization methods enabled: D-Bus, /dev/clipboard" in out
 
-    # 5) Assertions
-    assert "Traceback" not in err, "There should be no uncaught traceback"
-    assert "Clipboard synchronization via D-Bus is disabled" in err
-    assert "Listening for clipboard changes" in out
-
-#
-# ─── Test: D-Bus Available ────────────────────────────────────────────────────────
-#
 def test_main_registers_signal_receiver_when_dbus_available(monkeypatch, capsys):
-    """
-    If dbus.SessionBus().get_object succeeds, main() should call
-    add_signal_receiver on the bus with the correct parameters.
-    """
-    recorded = {}
-
-    # Stub SessionBus to return a bus with working get_object/add_signal_receiver
-    class FakeBus:
+    recorder = {}
+    class FakeBus3:
         def get_object(self, service, path):
-            return SimpleNamespace()  # dummy proxy
-
+            recorder["proxy"] = (service, path)
+            return SimpleNamespace()
         def add_signal_receiver(self, handler_function, signal_name, dbus_interface, path):
-            recorded['handler_function'] = handler_function
-            recorded['signal_name'] = signal_name
-            recorded['dbus_interface'] = dbus_interface
-            recorded['path'] = path
+            recorder.update(signal_name=signal_name, dbus_interface=dbus_interface, path=path)
 
-    monkeypatch.setattr(app.dbus, "SessionBus", lambda: FakeBus())
-
-    # Stub Interface to simply return a dummy klipper interface
-    monkeypatch.setattr(app.dbus, "Interface", lambda proxy, dbus_interface: "klipper_iface")
-
-    # Stub GLib.MainLoop to exit immediately via KeyboardInterrupt
-    fake_loop = FakeLoop(run_raises=KeyboardInterrupt)
-    monkeypatch.setattr(app.GLib, "MainLoop", lambda: fake_loop)
-
-    # Stub out device and websocket setup
-    monkeypatch.setattr(app, "setup_clipboard_device", lambda: None)
-    monkeypatch.setattr(app, "start_websocket_client", lambda: None)
-
-    # Run main
-    app.main()
-
-    # Verify the signal receiver was registered
-    assert recorded.get('signal_name') == "clipboardHistoryUpdated"
-    assert recorded.get('dbus_interface') == "org.kde.klipper.klipper"
-    assert recorded.get('path') == "/klipper"
-
-    captured = capsys.readouterr()
-    assert "Listening for clipboard changes" in captured.out
-    assert fake_loop.quit_called
-
-
-#
-# ─── Test: sys.exit Not Called on D-Bus Failure ─────────────────────────────────
-#
-def test_main_does_not_exit_on_dbus_unavailability(monkeypatch):
-    """
-    sys.exit should not be called when D-Bus is unavailable.
-    """
-    # Stub SessionBus to raise on get_object
-    class FakeBus2:
-        def get_object(self, *args, **kwargs):
-            raise app.dbus.DBusException("fail")
-
-    monkeypatch.setattr(app.dbus, "SessionBus", lambda: FakeBus2())
-
-    # Stub GLib.MainLoop to exit immediately via KeyboardInterrupt
-    fake_loop2 = FakeLoop(run_raises=KeyboardInterrupt)
-    monkeypatch.setattr(app.GLib, "MainLoop", lambda: fake_loop2)
-
-    # Stub side-effects
-    monkeypatch.setattr(app, "setup_clipboard_device", lambda: None)
-    monkeypatch.setattr(app, "start_websocket_client", lambda: None)
-
-    # Monitor sys.exit
-    exit_called = {'called': False}
-    monkeypatch.setattr(sys, "exit", lambda code=0: exit_called.__setitem__('called', True))
+    monkeypatch.setattr(app.dbus, "SessionBus", lambda *a, **k: FakeBus3())
+    monkeypatch.setattr(app.dbus, "Interface", lambda proxy, **kwargs: proxy)
+    monkeypatch.setattr(app, "setup_clipboard_device", lambda: True)
+    monkeypatch.setattr(app, "ENCRYPTION_AVAILABLE", False)
+    monkeypatch.setattr(sys, "exit", lambda code=1: None)
 
     app.main()
-    assert not exit_called['called']
 
+    assert recorder["signal_name"] == "clipboardHistoryUpdated"
+    assert recorder["dbus_interface"] == "org.kde.klipper.klipper"
+    assert recorder["path"] == "/klipper"
+    out, err = capsys.readouterr()
+    assert "Synchronization methods enabled" in out
 
