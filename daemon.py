@@ -128,6 +128,7 @@ if ENCRYPTION_AVAILABLE:
                 return key
         except FileNotFoundError:
             print(f"Encryption key file not found at {ENC_KEY_FILE}. Disabling WebSocket sync.", file=sys.stderr)
+            print("run python cli.py register, to create the default configuration file")
             return None
         except Exception as e:
             print(f"Error loading encryption key: {e}. Disabling WebSocket sync.", file=sys.stderr)
