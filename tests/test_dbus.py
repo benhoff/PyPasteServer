@@ -75,6 +75,7 @@ def test_sessionbus_exception_handled(monkeypatch, capsys):
     # 4) Run and capture output
     app.main()
     out, err = capsys.readouterr()
+    print(out, err)
 
     # 5) Assertions
     assert "Traceback" not in err, "There should be no uncaught traceback"

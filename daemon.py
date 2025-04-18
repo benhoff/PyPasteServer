@@ -511,11 +511,15 @@ def main():
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     loop = GLib.MainLoop()
 
+    klipper_present = True
     try:
         # Connect to the session bus
         bus = dbus.SessionBus()
-        klipper_present = True
+    except dbus.DBusException:
+        klipper_present = False
+        print("D-Bus interface not found. Clipboard synchronization via D-Bus is disabled.", file=sys.stderr)
 
+    if klipper_present:
         # Attempt to get the Klipper D-Bus object
         try:
             klipper_proxy = bus.get_object("org.kde.klipper", "/klipper")
@@ -535,6 +539,8 @@ def main():
             )
         else:
             print("Klipper D-Bus interface not found. Clipboard synchronization via D-Bus is disabled.", file=sys.stderr)
+
+    try:
     
         # Set up asynchronous monitoring of /dev/clipboard
         setup_clipboard_device()
@@ -549,9 +555,6 @@ def main():
             print("WebSocket synchronization is disabled.")
         print("Press Ctrl+C to exit.")
         loop.run()
-    except dbus.DBusException as e:
-        print(f"Failed to connect to Klipper D-Bus interface: {e}", file=sys.stderr)
-        sys.exit(1)
     except KeyboardInterrupt:
         print("\nExiting.")
         stop_event.set()
