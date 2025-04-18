@@ -100,6 +100,34 @@ def test_read_all_ewouldblock(monkeypatch):
     assert result == ""
     assert calls["count"] == 1
 
+def test_setup_clipboard_device_handles_missing_device(monkeypatch, capsys):
+    """
+    If os.open('/dev/clipboard') raises ENOENT, setup_clipboard_device()
+    should catch it, print an error, and NOT call sys.exit (so the app keeps running).
+    """
+    # Reload the module so we have a clean state
+    app = reload_module(monkeypatch)
+
+    # Stub os.open to simulate "No such file or directory"
+    import errno
+    def fake_open(path, flags):
+        raise OSError(errno.ENOENT, f"No such file or directory: '{path}'")
+    monkeypatch.setattr(app.os, "open", fake_open)
+
+    # Replace sys.exit with a recorder so it doesn't actually exit
+    exit_called = {"called": False}
+    monkeypatch.setattr(app.sys, "exit", lambda code=1: exit_called.__setitem__("called", True))
+
+    # Call the function under test
+    app.setup_clipboard_device()
+
+    # It should have printed the failure message...
+    captured = capsys.readouterr()
+    assert "Failed to open /dev/clipboard" in captured.err
+
+    # ...but not actually called sys.exit
+    assert exit_called["called"] is False
+
 
 def test_load_token_success(tmp_path, monkeypatch):
     # Create token.json under tmp/.config/clipboard_app

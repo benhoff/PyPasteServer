@@ -359,7 +359,7 @@ def setup_clipboard_device():
         clipboard_fd = os.open("/dev/clipboard", os.O_RDONLY | os.O_NONBLOCK)
     except OSError as e:
         print(f"Failed to open /dev/clipboard: {e}", file=sys.stderr)
-        sys.exit(1)
+        return
         
     # Get current file flags
     flags = fcntl.fcntl(clipboard_fd, fcntl.F_GETFL)
