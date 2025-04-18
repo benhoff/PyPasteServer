@@ -53,6 +53,34 @@ def test_main_continues_when_dbus_unavailable(monkeypatch, capsys):
     assert fake_loop.quit_called
 
 
+def test_sessionbus_exception_handled(monkeypatch, capsys):
+    """
+    Simulate dbus.SessionBus() throwing the X11‐display error.
+    main() should catch it, print the “disabled” message, and continue.
+    """
+    # 1) Stub SessionBus() to raise the specific D-Bus exception
+    msg = ("org.freedesktop.DBus.Error.NotSupported: "
+           "Unable to autolaunch a dbus-daemon without a $DISPLAY for X11")
+    exc = app.dbus.DBusException(msg)
+    monkeypatch.setattr(app.dbus, "SessionBus",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(exc))
+
+    # 2) Stub out GLib.MainLoop so we exit via KeyboardInterrupt
+    monkeypatch.setattr(app.GLib, "MainLoop",
+                        lambda: FakeLoop(run_raises=KeyboardInterrupt))
+    # 3) Stub out device and WS setup
+    monkeypatch.setattr(app, "setup_clipboard_device", lambda: None)
+    monkeypatch.setattr(app, "start_websocket_client", lambda: None)
+
+    # 4) Run and capture output
+    app.main()
+    out, err = capsys.readouterr()
+
+    # 5) Assertions
+    assert "Traceback" not in err, "There should be no uncaught traceback"
+    assert "Clipboard synchronization via D-Bus is disabled" in err
+    assert "Listening for clipboard changes" in out
+
 #
 # ─── Test: D-Bus Available ────────────────────────────────────────────────────────
 #
