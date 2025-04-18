@@ -359,7 +359,7 @@ def setup_clipboard_device():
         clipboard_fd = os.open("/dev/clipboard", os.O_RDONLY | os.O_NONBLOCK)
     except OSError as e:
         print(f"Failed to open /dev/clipboard: {e}", file=sys.stderr)
-        return
+        return False
         
     # Get current file flags
     flags = fcntl.fcntl(clipboard_fd, fcntl.F_GETFL)
@@ -372,6 +372,7 @@ def setup_clipboard_device():
 
     # Install signal handler for SIGIO
     signal.signal(signal.SIGIO, sigio_handler)
+    return True
 
 def load_token():
     """
@@ -543,7 +544,7 @@ def main():
     try:
     
         # Set up asynchronous monitoring of /dev/clipboard
-        setup_clipboard_device()
+        device_enabled = setup_clipboard_device()
 
         # Start WebSocket connection if encryption is available
         start_websocket_client()
@@ -553,6 +554,14 @@ def main():
             print("WebSocket synchronization is enabled.")
         else:
             print("WebSocket synchronization is disabled.")
+
+        # TODO: I'm sure there are cases where encryption is available and we fail to setup websockets
+        if not (klipper_present or device_enabled or ENCRYPTION_AVAILABLE):
+            print(
+                "All synchronization paths (D-Bus, /dev/clipboard, WebSocket) are disabled. Exiting.",
+                file=sys.stderr
+            )
+            sys.exit(1)
         print("Press Ctrl+C to exit.")
         loop.run()
     except KeyboardInterrupt:

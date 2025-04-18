@@ -46,6 +46,13 @@ def reload_module(monkeypatch, *, fake_crypto=True, enc_key_path=None):
     # 4) Finally import (or re-import) the module under test
     return importlib.import_module(MODULE_NAME)
 
+class FakeLoop:
+    def run(self):
+        # never actually loop
+        pass
+    def quit(self):
+        pass
+
 
 def test_strip_http_prefix(monkeypatch):
     app = reload_module(monkeypatch)
@@ -99,6 +106,43 @@ def test_read_all_ewouldblock(monkeypatch):
     result = app.read_all(fd=0, retry_count=1)
     assert result == ""
     assert calls["count"] == 1
+
+def test_exit_when_all_disabled(monkeypatch, capsys):
+    # 1) Reload module with no Crypto → ENCRYPTION_AVAILABLE=False
+    app = reload_module(monkeypatch)
+
+    # 2) Stub dbus.SessionBus() to raise DBusException → D-Bus disabled
+    exc = app.dbus.DBusException("not supported")
+    monkeypatch.setattr(app.dbus, "SessionBus",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(exc))
+
+    # 3) Stub setup_clipboard_device() to simulate missing /dev/clipboard
+    monkeypatch.setattr(app, "setup_clipboard_device",
+                        lambda: print("Failed to open /dev/clipboard: [Errno 2] No such file or directory: '/dev/clipboard'", file=sys.stderr))
+
+    # 4) Stub start_websocket_client() to report disabled WebSocket
+    monkeypatch.setattr(app, "start_websocket_client",
+                        lambda: print("WebSocket client not started because encryption is unavailable.", file=sys.stderr))
+
+    # 5) Stub GLib.MainLoop so we don’t hang
+    monkeypatch.setattr(app.GLib, "MainLoop", lambda: FakeLoop())
+
+    # 6) Make sys.exit raise SystemExit so we can catch it
+    monkeypatch.setattr(sys, "exit", lambda code=1: (_ for _ in ()).throw(SystemExit(code)))
+
+    # 7) Run and expect exit
+    with pytest.raises(SystemExit) as excinfo:
+        app.main()
+
+    out, err = capsys.readouterr()
+
+    # 8) Verify all three failure messages printed
+    assert "Clipboard synchronization via D-Bus is disabled" in err
+    assert "Failed to open /dev/clipboard" in err
+    assert "WebSocket client not started because encryption is unavailable." in err
+
+    # 9) Verify we exit with code 1
+    assert excinfo.value.code == 1
 
 def test_setup_clipboard_device_handles_missing_device(monkeypatch, capsys):
     """
