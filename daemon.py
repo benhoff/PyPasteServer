@@ -116,42 +116,35 @@ stop_event = threading.Event()
 if ENCRYPTION_AVAILABLE:
     def load_encryption_key():
         """
-        Loads the encryption key from the ENC_KEY_FILE.
-        
-        Returns:
-            bytes: The 32-byte encryption key.
-        
-        Exits:
-            If the key file is missing or invalid.
+        Attempts to load the encryption key from ENC_KEY_FILE.
+        Returns the 32‐byte key on success, or None on any failure.
         """
         try:
             with open(ENC_KEY_FILE, 'rb') as f:
                 key = f.read()
                 if len(key) != 32:
                     print(f"Invalid encryption key length in {ENC_KEY_FILE}. Expected 32 bytes.", file=sys.stderr)
-                    sys.exit(1)
+                    return None
                 return key
         except FileNotFoundError:
-            print(f"Encryption key file not found at {ENC_KEY_FILE}.", file=sys.stderr)
-            sys.exit(1)
+            print(f"Encryption key file not found at {ENC_KEY_FILE}. Disabling WebSocket sync.", file=sys.stderr)
+            return None
         except Exception as e:
-            print(f"Error loading encryption key: {e}", file=sys.stderr)
-            sys.exit(1)
-    
-    ENC_KEY = load_encryption_key()
-    cipher = ChaCha20_Poly1305.new(key=ENC_KEY)
+            print(f"Error loading encryption key: {e}. Disabling WebSocket sync.", file=sys.stderr)
+            return None
 
+    _key = load_encryption_key()
+    if _key is None:
+        # fallback: disable encryption & WebSocket features
+        ENCRYPTION_AVAILABLE = False
+    else:
+        ENC_KEY = _key
+        cipher = ChaCha20_Poly1305.new(key=ENC_KEY)
+
+# Define encrypt/decrypt functions based on ENCRYPTION_AVAILABLE
+if ENCRYPTION_AVAILABLE:
     def encrypt_message(message: str) -> dict:
-        """
-        Encrypts a plaintext message using ChaCha20-Poly1305.
-        
-        Args:
-            message (str): The plaintext message to encrypt.
-        
-        Returns:
-            dict: A dictionary containing Base64-encoded nonce and ciphertext.
-        """
-        nonce = get_random_bytes(NONCE_SIZE)  # Use nonce size from config
+        nonce = get_random_bytes(NONCE_SIZE)
         cipher = ChaCha20_Poly1305.new(key=ENC_KEY, nonce=nonce)
         ciphertext, tag = cipher.encrypt_and_digest(message.encode())
         return {
@@ -161,20 +154,6 @@ if ENCRYPTION_AVAILABLE:
         }
 
     def decrypt_message(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
-        """
-        Decrypts a ciphertext message using ChaCha20-Poly1305.
-        
-        Args:
-            nonce_b64 (str): Base64-encoded nonce.
-            ciphertext_b64 (str): Base64-encoded ciphertext.
-            tag_b64 (str): Base64-encoded authentication tag.
-        
-        Returns:
-            str: The decrypted plaintext message.
-        
-        Raises:
-            ValueError: If decryption fails.
-        """
         try:
             nonce = base64.b64decode(nonce_b64)
             ciphertext = base64.b64decode(ciphertext_b64)
@@ -186,11 +165,7 @@ if ENCRYPTION_AVAILABLE:
             print(f"Decryption failed: {e}", file=sys.stderr)
             return ""
 else:
-    # Define dummy encryption functions
     def encrypt_message(message: str) -> dict:
-        """
-        Dummy encryption function when encryption is not available.
-        """
         return {
             "nonce": "",
             "ciphertext": message,
@@ -198,10 +173,7 @@ else:
         }
 
     def decrypt_message(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
-        """
-        Dummy decryption function when encryption is not available.
-        """
-        return ciphertext_b64  # Return ciphertext as plaintext
+        return ciphertext_b64
 
 def read_all(fd, retry_count=MAX_RETRIES):
     """
