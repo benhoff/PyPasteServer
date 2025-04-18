@@ -50,15 +50,8 @@ def load_config(create_if_missing=False):
     If create_if_missing is True and the config file doesn't exist,
     creates the config file with default settings.
     
-    Args:
-        create_if_missing (bool): Whether to create the config file if it's missing.
-    
     Returns:
-        configparser.ConfigParser: The loaded configuration.
-    
-    Exits:
-        If the configuration file is missing and create_if_missing is False,
-        or if the file is invalid.
+        configparser.ConfigParser: The loaded configuration (possibly empty).
     """
     config = configparser.ConfigParser()
     config_path = Path(os.path.expanduser("~/.config/clipboard_app/config.ini"))
@@ -67,25 +60,26 @@ def load_config(create_if_missing=False):
         if create_if_missing:
             print(f"Configuration file not found at {config_path}. Creating default configuration.")
             create_default_config(config_path)
+            # attempt to read it back in
+            try:
+                config.read(config_path)
+            except configparser.Error as e:
+                print(f"Error parsing newly‐created config: {e}", file=sys.stderr)
         else:
-            print(f"Configuration file not found at {config_path}.", file=sys.stderr)
-            sys.exit(1)
+            print(f"Configuration file not found at {config_path}. Using default configuration.", file=sys.stderr)
+            # return empty config so callers fall back on their own defaults
+            return config
+    else:
+        # file exists — try to load it
+        try:
+            config.read(config_path)
+        except configparser.Error as e:
+            print(f"Error parsing configuration file: {e}", file=sys.stderr)
+            print("Using default configuration values.", file=sys.stderr)
+            # return what we have (likely empty)
+            return config
 
-    try:
-        config.read(config_path)
-        return config
-    except configparser.Error as e:
-        print(f"Error parsing configuration file: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-# Load configuration (without creating it by default)
-config = load_config(create_if_missing=False)
-
-# Extract configuration values
-SERVER_URL = config.get('Server', 'url', fallback="http://127.0.0.1:8001")
-TOKEN_FILE = Path(os.path.expanduser(config.get('Paths', 'token_file', fallback="~/.config/clipboard_app/token.json")))
-KEY_FILE = Path(os.path.expanduser(config.get('Paths', 'enc_key_file', fallback="~/.config/clipboard_app/key")))
+    return config
 
 
 def prompt_user_details():
@@ -552,6 +546,15 @@ def main():
     """
     Main function to parse arguments and execute commands.
     """
+    config = load_config(create_if_missing=False)
+
+    # Extract configuration values
+    SERVER_URL = config.get('Server', 'url', fallback="http://127.0.0.1:8001")
+    # Load configuration (without creating it by default)
+    TOKEN_FILE = Path(os.path.expanduser(config.get('Paths', 'token_file', fallback="~/.config/clipboard_app/token.json")))
+    KEY_FILE = Path(os.path.expanduser(config.get('Paths', 'enc_key_file', fallback="~/.config/clipboard_app/key")))
+
+
     parser = argparse.ArgumentParser(
         description="Command-Line Clipboard Application",
         usage="python cli_app.py <command> [<args>]"
