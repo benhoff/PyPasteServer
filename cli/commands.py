@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .auth import login_user, logout_user, prompt_user_details, register_user
+from .colors import color_text, style_text
 from .config import DEFAULT_CONFIG_PATH, create_default_config, load_config
 from .mnemonic_utils import (
     generate_and_save_mnemonic,
@@ -24,7 +25,12 @@ def _expand(path: Path) -> Path:
 def register_command(args: Any) -> None:
     config_path = DEFAULT_CONFIG_PATH
     if not config_path.exists():
-        print(f"Configuration file not found at {config_path}. Creating default configuration.")
+        print(
+            color_text(
+                f"Configuration file not found at {config_path}. Creating default configuration.",
+                "yellow",
+            )
+        )
         create_default_config(config_path)
 
     server_url = args.server
@@ -34,17 +40,17 @@ def register_command(args: Any) -> None:
     user_data = prompt_user_details()
 
     try:
-        print("\nRegistering user...")
+        print(style_text("\nRegistering user...", "bold"))
         token = register_user(server_url, user_data)
-        print("Registration successful.")
+        print(color_text("Registration successful.", "green"))
     except ValueError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
     except ConnectionError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
     except Exception as exc:
-        print(f"An unexpected error occurred: {exc}")
+        print(color_text(f"An unexpected error occurred: {exc}", "red"))
         sys.exit(1)
 
     try:
@@ -52,30 +58,30 @@ def register_command(args: Any) -> None:
     except SystemExit:
         raise
     except Exception as exc:
-        print(f"Failed to handle mnemonic generation: {exc}")
+        print(color_text(f"Failed to handle mnemonic generation: {exc}", "red"))
         sys.exit(1)
 
     try:
         save_json_data({"access_token": token}, token_file)
     except IOError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
 
-    print("\nRegistration and key generation complete.")
-    print(f"Access Token saved to: {token_file}")
-    print(f"Byte-Based Key saved to: {key_file}")
+    print(style_text("\nRegistration and key generation complete.", "bold", "green"))
+    print(color_text(f"Access Token saved to: {token_file}", "cyan"))
+    print(color_text(f"Byte-Based Key saved to: {key_file}", "cyan"))
 
 
 def login_command(args: Any) -> None:
-    print("=== User Login ===")
+    print(style_text("=== User Login ===", "bold", "cyan"))
     username = input("Enter username: ").strip()
     while not username:
-        print("Username cannot be empty.")
+        print(color_text("Username cannot be empty.", "yellow"))
         username = input("Enter username: ").strip()
 
     password = getpass("Enter password: ").strip()
     while not password:
-        print("Password cannot be empty.")
+        print(color_text("Password cannot be empty.", "yellow"))
         password = getpass("Enter password: ").strip()
 
     server_url = args.server
@@ -83,28 +89,28 @@ def login_command(args: Any) -> None:
     key_file = _expand(args.key_file)
 
     try:
-        print("\nLogging in...")
+        print(style_text("\nLogging in...", "bold"))
         token = login_user(server_url, username, password)
-        print("Login successful.")
+        print(color_text("Login successful.", "green"))
     except ValueError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
     except ConnectionError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
     except Exception as exc:
-        print(f"An unexpected error occurred: {exc}")
+        print(color_text(f"An unexpected error occurred: {exc}", "red"))
         sys.exit(1)
 
     try:
         save_json_data({"access_token": token}, token_file)
     except IOError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
 
-    print(f"\nAccess Token saved to: {token_file}")
+    print(color_text(f"\nAccess Token saved to: {token_file}", "cyan"))
 
-    print("\n=== Encryption Key Management ===")
+    print(style_text("\n=== Encryption Key Management ===", "bold", "cyan"))
     while True:
         choice = input("Do you want to provide an existing mnemonic? (yes/no): ").strip().lower()
         if choice in {"yes", "y"}:
@@ -114,28 +120,28 @@ def login_command(args: Any) -> None:
             except SystemExit:
                 raise
             except Exception as exc:
-                print(f"Error saving the mnemonic: {exc}")
+                print(color_text(f"Error saving the mnemonic: {exc}", "red"))
                 sys.exit(1)
             break
         if choice in {"no", "n"}:
             generate_and_save_mnemonic(key_file)
             break
-        print("Invalid input. Please enter 'yes' or 'no'.")
+        print(color_text("Invalid input. Please enter 'yes' or 'no'.", "yellow"))
 
-    print("\nLogin and key management complete.")
-    print(f"Encryption Key saved to: {key_file}")
+    print(style_text("\nLogin and key management complete.", "bold", "green"))
+    print(color_text(f"Encryption Key saved to: {key_file}", "cyan"))
 
 
 def logout_command(args: Any) -> None:
     token_file = _expand(args.token_file)
     try:
         logout_user(token_file)
-        print("Logout successful.")
+        print(color_text("Logout successful.", "green"))
     except IOError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
     except Exception as exc:
-        print(f"An unexpected error occurred: {exc}")
+        print(color_text(f"An unexpected error occurred: {exc}", "red"))
         sys.exit(1)
 
 
@@ -144,13 +150,13 @@ def sync_command(args: Any) -> None:
     try:
         sync_with_server(args.server, token_file)
     except ValueError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
     except ConnectionError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
     except Exception as exc:
-        print(f"An unexpected error occurred: {exc}")
+        print(color_text(f"An unexpected error occurred: {exc}", "red"))
         sys.exit(1)
 
 
@@ -159,10 +165,10 @@ def key_command(args: Any) -> None:
     try:
         print_key(key_file)
     except ValueError as exc:
-        print(f"Error: {exc}")
+        print(color_text(f"Error: {exc}", "red"))
         sys.exit(1)
     except Exception as exc:
-        print(f"An unexpected error occurred: {exc}")
+        print(color_text(f"An unexpected error occurred: {exc}", "red"))
         sys.exit(1)
 
 
@@ -190,17 +196,22 @@ def status_command(_: Any) -> None:
         except OSError:
             key_has_data = False
 
-    print("=== CLI Status ===")
-    print(f"Configuration file: {config_path} ({'present' if config_exists else 'missing'})")
-    print(f"Server URL: {server_url}")
-    print(f"Token file: {token_file} ({'present' if token_exists else 'missing'})")
-    print(f"Access token stored: {'yes' if token_present else 'no'}")
+    def flag(value: bool, *, yes: str = "yes", no: str = "no") -> str:
+        return color_text(yes, "green") if value else color_text(no, "red")
+
+    print(style_text("=== CLI Status ===", "bold", "cyan"))
+    config_state = flag(config_exists, yes="present", no="missing")
     print(
-        f"Key file: {key_file} ("
-        f"{'present' if key_exists else 'missing'}"
-        f"{' with data' if key_exists and key_has_data else ''}"
-        f")"
+        f"Configuration file: {color_text(str(config_path), 'cyan')} ({config_state})"
     )
+    print(f"Server URL: {color_text(server_url, 'cyan')}")
+    token_state = flag(token_exists, yes="present", no="missing")
+    print(f"Token file: {color_text(str(token_file), 'cyan')} ({token_state})")
+    print(f"Access token stored: {flag(token_present)}")
+
+    key_state = flag(key_exists, yes="present", no="missing")
+    data_descriptor = color_text(" with data", "green") if key_exists and key_has_data else ""
+    print(f"Key file: {color_text(str(key_file), 'cyan')} ({key_state}{data_descriptor})")
 
 
 def help_command(args: Any, parser: argparse.ArgumentParser) -> None:
