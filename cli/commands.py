@@ -242,6 +242,7 @@ def status_command(_: Any) -> None:
     token_state = flag(token_exists, yes="present", no="missing")
     print(f"Token file: {color_text(str(token_file), 'cyan')} ({token_state})")
     print(f"Access token stored: {flag(token_present)}")
+    print(f"Logged in: {flag(token_present)}")
 
     key_state = flag(key_exists, yes="present", no="missing")
     data_descriptor = color_text(" with data", "green") if key_exists and key_has_data else ""
