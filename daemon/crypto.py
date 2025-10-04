@@ -55,14 +55,18 @@ def encrypt_message(message: str) -> Dict[str, str]:
 def decrypt_message(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
     if not encryption_available():
         return ciphertext_b64
+    if not nonce_b64 or not ciphertext_b64 or not tag_b64:
+        return ""
     try:
         nonce = base64.b64decode(nonce_b64)
         ciphertext = base64.b64decode(ciphertext_b64)
         tag = base64.b64decode(tag_b64)
+        if len(nonce) not in (8, 12, 24):
+            print("Decryption skipped: invalid nonce length received.")
+            return ""
         cipher = ChaCha20_Poly1305.new(key=_load_key(), nonce=nonce)
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
         return plaintext.decode()
     except Exception as e:
         print(f"Decryption failed: {e}")
         return ""
-
