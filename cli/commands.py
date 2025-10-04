@@ -6,14 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from .auth import login_user, logout_user, prompt_user_details, register_user
-from .config import DEFAULT_CONFIG_PATH, create_default_config
+from .config import DEFAULT_CONFIG_PATH, create_default_config, load_config
 from .mnemonic_utils import (
     generate_and_save_mnemonic,
     print_key,
     prompt_for_mnemonic,
     save_mnemonic_phrase,
 )
-from .storage import save_json_data
+from .storage import load_json_data, save_json_data
 from .sync import sync_with_server
 
 
@@ -164,6 +164,43 @@ def key_command(args: Any) -> None:
     except Exception as exc:
         print(f"An unexpected error occurred: {exc}")
         sys.exit(1)
+
+
+def status_command(_: Any) -> None:
+    config_path = DEFAULT_CONFIG_PATH
+    config_exists = config_path.exists()
+    config = load_config(create_if_missing=False)
+
+    server_url = config.get("Server", "url", fallback="http://127.0.0.1:8001")
+    token_path_raw = config.get("Paths", "token_file", fallback="~/.config/clipboard_app/token.json")
+    key_path_raw = config.get("Paths", "enc_key_file", fallback="~/.config/clipboard_app/key")
+
+    token_file = _expand(Path(token_path_raw))
+    key_file = _expand(Path(key_path_raw))
+
+    token_exists = token_file.exists()
+    token_data = load_json_data(token_file) if token_exists else None
+    token_present = bool(token_data and token_data.get("access_token"))
+
+    key_exists = key_file.exists()
+    key_has_data = False
+    if key_exists:
+        try:
+            key_has_data = key_file.stat().st_size > 0
+        except OSError:
+            key_has_data = False
+
+    print("=== CLI Status ===")
+    print(f"Configuration file: {config_path} ({'present' if config_exists else 'missing'})")
+    print(f"Server URL: {server_url}")
+    print(f"Token file: {token_file} ({'present' if token_exists else 'missing'})")
+    print(f"Access token stored: {'yes' if token_present else 'no'}")
+    print(
+        f"Key file: {key_file} ("
+        f"{'present' if key_exists else 'missing'}"
+        f"{' with data' if key_exists and key_has_data else ''}"
+        f")"
+    )
 
 
 def help_command(args: Any, parser: argparse.ArgumentParser) -> None:

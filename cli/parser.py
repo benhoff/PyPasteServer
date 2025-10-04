@@ -9,6 +9,7 @@ from .commands import (
     login_command,
     logout_command,
     register_command,
+    status_command,
     sync_command,
 )
 
@@ -111,6 +112,11 @@ def build_parser(config: Any) -> argparse.ArgumentParser:
         help=f"Path to the byte-based key file (default: {key_file})",
     )
     parser_key.set_defaults(func=key_command)
+
+    parser_status = subparsers.add_parser(
+        "status", help="Show high-level details about the current configuration"
+    )
+    parser_status.set_defaults(func=status_command)
 
     parser_help = subparsers.add_parser(
         "help",
