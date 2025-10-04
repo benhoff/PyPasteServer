@@ -22,7 +22,7 @@ class ClipboardResponse(BaseModel):
     tag: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class TokenSchema(BaseModel):

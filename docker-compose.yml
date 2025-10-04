@@ -13,7 +13,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - DATABASE_URL=sqlite:///./clipboard.db
+      - DATABASE_URL=sqlite:////app/clipboard.db
       - JWT_SECRET=supersecretkey
       - JWT_ALGORITHM=HS256
       - REDIS_URL=redis://redis:6379
