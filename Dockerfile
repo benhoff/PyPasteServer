@@ -32,4 +32,4 @@ VOLUME ["/app"]
 EXPOSE 8001
 
 # Command to run the FastAPI application with Gunicorn and Uvicorn workers
-CMD ["gunicorn", "server:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8001", "--workers", "4"]
+CMD ["gunicorn", "server_app.main:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8001", "--workers", "4"]

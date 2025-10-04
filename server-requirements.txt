@@ -1,0 +1,6 @@
+fastapi[standard]
+python-jose[cryptography]
+passlib[bcrypt]
+sqlalchemy
+gunicorn
+redis>=4.0.0
