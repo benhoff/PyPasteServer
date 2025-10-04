@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pypasteserver-daemon"
+version = "0.0.0"
+description = "Local clipboard daemon for PyPasteServer"
+authors = [{name = "Ben Hoff", email = "hoff.benjamin.k@gmail.com"}]
+requires-python = ">=3.11"
+readme = "../README.md"
+dependencies = [
+    "pygobject; platform_system != 'Windows'",
+    "dbus-python; platform_system != 'Windows'",
+    "pycryptodome",
+    "websocket-client",
+]
+
+[tool.setuptools]
+packages = ["daemon"]

@@ -1,24 +1,25 @@
-  [build-system]
-  requires = ["setuptools"]
-  build-backend = "setuptools.build_meta"
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
 
-  [project]
-  name = "daemon"
-  version = "0.1.0"
-  description = "Clipboard daemon with optional sync and Klipper integrations"
-  authors = [{ name = "Ben Hoff" }]
-  requires-python = ">=3.8"
+[project]
+name = "pypasteserver"
+version = "0.0.0"
+description = "Clipboard server"
+authors = [{name = "Ben Hoff", email = "hoff.benjamin.k@gmail.com"}]
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "fastapi[standard]",
+    "python-jose[cryptography]",
+    "passlib[bcrypt]",
+    "sqlalchemy",
+    "gunicorn",
+    "redis>=4.0.0",
+]
 
-  [project.optional-dependencies]
-  sync = [
-      "pycryptodome",
-      "websocket-client",
-  ]
-  klipper = [
-      "dbus-python",
-  ]
+[tool.setuptools]
+packages = ["server_app"]
 
-  [tool.setuptools]
-  packages = ["daemon"]
-
-
+[tool.setuptools.package-dir]
+server_app = "server_app"
