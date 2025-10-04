@@ -1,0 +1,24 @@
+  [build-system]
+  requires = ["setuptools"]
+  build-backend = "setuptools.build_meta"
+
+  [project]
+  name = "daemon"
+  version = "0.1.0"
+  description = "Clipboard daemon with optional sync and Klipper integrations"
+  authors = [{ name = "Ben Hoff" }]
+  requires-python = ">=3.8"
+
+  [project.optional-dependencies]
+  sync = [
+      "pycryptodome",
+      "websocket-client",
+  ]
+  klipper = [
+      "dbus-python",
+  ]
+
+  [tool.setuptools]
+  packages = ["daemon"]
+
+
