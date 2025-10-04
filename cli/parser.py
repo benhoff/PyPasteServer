@@ -6,6 +6,7 @@ from typing import Any
 from .commands import (
     help_command,
     key_command,
+    init_command,
     login_command,
     logout_command,
     register_command,
@@ -112,6 +113,40 @@ def build_parser(config: Any) -> argparse.ArgumentParser:
         help=f"Path to the byte-based key file (default: {key_file})",
     )
     parser_key.set_defaults(func=key_command)
+
+    parser_init = subparsers.add_parser(
+        "init",
+        help="Create the default config and guide you through registration",
+    )
+    parser_init.add_argument(
+        "--server",
+        type=str,
+        default=server_url,
+        help=f"URL of the server (default: {server_url})",
+    )
+    parser_init.add_argument(
+        "--token-file",
+        type=Path,
+        default=token_file,
+        help=f"Path for the access token (default: {token_file})",
+    )
+    parser_init.add_argument(
+        "--key-file",
+        type=Path,
+        default=key_file,
+        help=f"Path for the byte-based key (default: {key_file})",
+    )
+    parser_init.add_argument(
+        "--register",
+        action="store_true",
+        help="Run the registration flow immediately after setup",
+    )
+    parser_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the existing configuration if it already exists",
+    )
+    parser_init.set_defaults(func=init_command)
 
     parser_status = subparsers.add_parser(
         "status", help="Show high-level details about the current configuration"

@@ -172,6 +172,40 @@ def key_command(args: Any) -> None:
         sys.exit(1)
 
 
+def init_command(args: Any) -> None:
+    config_path = DEFAULT_CONFIG_PATH
+    config_exists = config_path.exists()
+    force_create = getattr(args, "force", False)
+
+    if config_exists and not force_create:
+        print(color_text(f"Configuration already exists at {config_path}.", "cyan"))
+    else:
+        if config_exists and force_create:
+            print(color_text(f"Overwriting configuration at {config_path}.", "yellow"))
+        else:
+            print(color_text(f"Creating configuration at {config_path}.", "cyan"))
+        create_default_config(config_path)
+        print(color_text("Default configuration ready.", "green"))
+
+    print(style_text("\nGetting Started", "bold", "cyan"))
+    print(color_text("1. Review the current configuration details below.", "cyan"))
+    print(color_text("2. Register a new account to receive your access token.", "cyan"))
+    print(color_text("3. Use `cli.py sync` or `cli.py key` once authenticated.", "cyan"))
+
+    status_command(args)
+
+    if getattr(args, "register", False):
+        print(style_text("\nStarting interactive registration...", "bold", "cyan"))
+        register_command(args)
+    else:
+        print(
+            color_text(
+                "\nRun `cli.py register` when you're ready to create your account.",
+                "yellow",
+            )
+        )
+
+
 def status_command(_: Any) -> None:
     config_path = DEFAULT_CONFIG_PATH
     config_exists = config_path.exists()
