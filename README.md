@@ -91,6 +91,38 @@ python -m daemon
 
 Configure `~/.config/clipboard_app/config.ini` with the server URL and token locations. The CLI (`cli.py`) can generate the config, register users, and manage access tokens.
 
+### Loading the kclip kernel module
+
+The daemon reads clipboard updates from `/dev/kclip`, which is provided by the out-of-tree `kclip` kernel module (see the sibling `kclip/` project). To load it automatically at boot:
+
+1. Copy the provided modules-load configuration into place:
+
+   ```bash
+   sudo install -m 0644 conf/kclip.conf /etc/modules-load.d/pypasteserver-kclip.conf
+   sudo systemctl restart systemd-modules-load.service
+   ```
+
+2. Verify the module is loaded and the device node exists:
+
+   ```bash
+   lsmod | grep kclip
+   ls -l /dev/kclip
+   ```
+
+   If `/dev/kclip` is missing, run `sudo modprobe kclip` (after installing `kclip.ko` under `/usr/lib/modules/$(uname -r)/extra/` and running `sudo depmod`).
+
+### Running the daemon under systemd
+
+Install the unit as a system service that runs under the desktop user (update `User=`, `Group=`, `WorkingDirectory`, and `PYTHONPATH` first):
+
+```bash
+sudo install -m 0644 conf/pypasteserver-daemon.service /etc/systemd/system/pypasteserver-daemon.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now pypasteserver-daemon.service
+```
+
+Check logs with `journalctl -u pypasteserver-daemon.service -f`. If you prefer using a per-user systemd instance instead, drop the `User=`/`Group=` lines and copy the unit into `~/.config/systemd/user/` before enabling it with `systemctl --user`.
+
 ---
 
 ## CLI utility
