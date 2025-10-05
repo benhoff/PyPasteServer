@@ -39,6 +39,9 @@ class ConnectionManager:
                 "nonce": nonce,
                 "tag": tag,
             }
+            meta = data.get("meta")
+            if isinstance(meta, dict) and meta:
+                update_message["meta"] = meta
             await self.broadcast(user_id, update_message)
 
     async def start_listening(self) -> None:

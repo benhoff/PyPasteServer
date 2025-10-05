@@ -4,7 +4,7 @@ import os
 import signal
 from gi.repository import GLib
 
-from .kclip import KCLIP_SLOT_DEFAULT, fetch_message, message_text
+from .kclip import KCLIP_SLOT_DEFAULT, fetch_message, message_text, meta_to_payload
 
 
 class ClipboardDevice:
@@ -28,8 +28,9 @@ class ClipboardDevice:
             print(f"Error fetching {self.path}: {e}")
             return False
         data = message_text(message)
+        meta = meta_to_payload(message.meta)
         if data:
-            self.on_data(data)
+            self.on_data(data, meta)
         return False
 
     def start(self) -> bool:
@@ -71,7 +72,8 @@ class ClipboardDevice:
                 break
 
             data = message_text(message)
+            meta = meta_to_payload(message.meta)
             if data:
-                self.on_data(data)
+                self.on_data(data, meta)
 
             nonblock = True

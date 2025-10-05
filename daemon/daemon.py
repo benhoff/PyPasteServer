@@ -16,9 +16,9 @@ import configparser
 from pathlib import Path
 
 try:
-    from .kclip import KCLIP_SLOT_DEFAULT, fetch_message, message_text
+    from .kclip import KCLIP_SLOT_DEFAULT, fetch_message, message_text, meta_to_payload
 except ImportError:  # pragma: no cover - legacy direct invocation support
-    from kclip import KCLIP_SLOT_DEFAULT, fetch_message, message_text
+    from kclip import KCLIP_SLOT_DEFAULT, fetch_message, message_text, meta_to_payload
 
 # Attempt to import Crypto libraries
 try:
@@ -184,12 +184,16 @@ else:
         return ciphertext_b64
 
 def read_all(fd, retry_count=MAX_RETRIES):
-    """Fetch one clipboard message via kclip and return its textual payload."""
+    """Fetch one clipboard message via kclip.
+
+    Returns a tuple of (text, metadata_dict). Metadata may be None when the
+    kernel did not supply any or when an error occurs.
+    """
 
     try:
         message = fetch_message(fd, slot=KCLIP_SLOT_DEFAULT, nonblock=True)
     except BlockingIOError:
-        return ""
+        return "", None
     except OSError as e:
         if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
             if retry_count > 0:
@@ -202,10 +206,10 @@ def read_all(fd, retry_count=MAX_RETRIES):
                     f"Maximum retry attempts ({MAX_RETRIES}) reached. Giving up on reading from fd {fd}.",
                     file=sys.stderr,
                 )
-            return ""
+            return "", None
         raise
 
-    return message_text(message)
+    return message_text(message), meta_to_payload(message.meta)
 
 def handle_retry_read(fd, retry_count):
     """
@@ -219,19 +223,20 @@ def handle_retry_read(fd, retry_count):
         bool: False to ensure the timeout is not called again.
     """
     try:
-        data = read_all(fd, retry_count)
+        data, meta = read_all(fd, retry_count)
         if data:
-            process_read_data(data)
+            process_read_data(data, meta)
     except Exception as e:
         print(f"Error during retry read: {e}", file=sys.stderr)
     return False  # Ensure this timeout handler is only called once
 
-def process_read_data(data):
+def process_read_data(data, meta):
     """
     Processes the data read from the clipboard device.
 
     Args:
         data (str): The clipboard data to process.
+        meta (dict | None): Optional metadata describing the clipboard source.
     """
     global CLIPBOARD_HISTORY
     if data and data != CLIPBOARD_HISTORY:
@@ -244,7 +249,7 @@ def process_read_data(data):
                 print(f"Error setting clipboard contents in Klipper: {e}", file=sys.stderr)
         # Send the updated clipboard content to the server if encryption and WebSocket are available
         if ENCRYPTION_AVAILABLE:
-            send_clipboard_update(data)
+            send_clipboard_update(data, meta)
 
 def on_clipboard_history_updated():
     """
@@ -261,7 +266,12 @@ def on_clipboard_history_updated():
         klipper.setClipboardContents(clipboard_content)
         # Send the updated clipboard content to the server if encryption and WebSocket are available
         if ENCRYPTION_AVAILABLE:
-            send_clipboard_update(clipboard_content)
+            meta = {
+                "ts_ns": time.time_ns(),
+                "uid": os.getuid(),
+                "comm": "klipper",
+            }
+            send_clipboard_update(clipboard_content, meta)
     except dbus.DBusException as e:
         print(f"Error retrieving clipboard contents: {e}", file=sys.stderr)
 
@@ -274,7 +284,7 @@ def sigio_handler(signum, frame):
 
     while True:
         try:
-            data = read_all(clipboard_fd)
+            data, meta = read_all(clipboard_fd)
         except OSError as e:
             print(f"Error reading /dev/kclip: {e}", file=sys.stderr)
             break
@@ -282,7 +292,7 @@ def sigio_handler(signum, frame):
         if not data:
             break
 
-        process_read_data(data)
+        process_read_data(data, meta)
 
 def on_clipboard_device_ready(source, condition):
     """
@@ -299,7 +309,7 @@ def on_clipboard_device_ready(source, condition):
     if condition == GLib.IO_IN:
         while True:
             try:
-                data = read_all(clipboard_fd)
+                data, meta = read_all(clipboard_fd)
             except OSError as e:
                 print(f"Error reading /dev/kclip: {e}", file=sys.stderr)
                 break
@@ -307,7 +317,7 @@ def on_clipboard_device_ready(source, condition):
             if not data:
                 break
 
-            process_read_data(data)
+            process_read_data(data, meta)
     return True  # Keep the callback active
 
 def setup_clipboard_device():
@@ -356,7 +366,7 @@ def load_token():
         print(f"Token file {TOKEN_FILE} is not valid JSON.", file=sys.stderr)
         sys.exit(1)
 
-def send_clipboard_update(text):
+def send_clipboard_update(text, meta=None):
     """
     Sends the encrypted clipboard update to the server via WebSocket.
     
@@ -367,12 +377,15 @@ def send_clipboard_update(text):
     if ENCRYPTION_AVAILABLE and ws and ws.sock and ws.sock.connected:
         try:
             encrypted_message = encrypt_message(text)
-            message = json.dumps({
+            payload = {
                 "type": "update",
                 "nonce": encrypted_message["nonce"],
                 "ciphertext": encrypted_message["ciphertext"],
-                "tag": encrypted_message["tag"]
-            })
+                "tag": encrypted_message["tag"],
+            }
+            if meta:
+                payload["meta"] = meta
+            message = json.dumps(payload)
             ws.send(message)
         except Exception as e:
             print(f"Failed to send clipboard update: {e}", file=sys.stderr)

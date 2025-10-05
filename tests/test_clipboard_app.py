@@ -97,12 +97,15 @@ def test_load_config_override(tmp_path, monkeypatch):
 def test_read_all_success(monkeypatch):
     app = reload_module(monkeypatch)
 
-    fake_msg = object()
+    from types import SimpleNamespace
+
+    fake_msg = SimpleNamespace(meta=None)
     monkeypatch.setattr(app, "fetch_message", lambda fd, slot=app.KCLIP_SLOT_DEFAULT, nonblock=True: fake_msg)
     monkeypatch.setattr(app, "message_text", lambda msg: "hello world")
 
-    result = app.read_all(fd=0)
-    assert result == "hello world"
+    text, meta = app.read_all(fd=0)
+    assert text == "hello world"
+    assert meta is None
 
 
 def test_read_all_ewouldblock(monkeypatch):
@@ -120,8 +123,9 @@ def test_read_all_ewouldblock(monkeypatch):
         return 1
 
     monkeypatch.setattr(app.GLib, "timeout_add", fake_timeout_add)
-    result = app.read_all(fd=0, retry_count=1)
-    assert result == ""
+    text, meta = app.read_all(fd=0, retry_count=1)
+    assert text == ""
+    assert meta is None
     assert calls["count"] == 0
 
 def test_exit_when_all_disabled(monkeypatch, capsys):

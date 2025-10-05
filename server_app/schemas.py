@@ -10,19 +10,29 @@ class UserCreate(BaseModel):
     email: EmailStr
 
 
+class ClipboardMeta(BaseModel):
+    ts_ns: int | None = None
+    uid: int | None = None
+    pid: int | None = None
+    comm: str | None = None
+
+
 class ClipboardCreate(BaseModel):
     ciphertext: str
     nonce: str
     tag: str
+    meta: ClipboardMeta | None = None
 
 
 class ClipboardResponse(BaseModel):
     ciphertext: str
     nonce: str
     tag: str
+    meta: ClipboardMeta | None = None
 
     class Config:
         from_attributes = True
+
 
 
 class TokenSchema(BaseModel):
@@ -34,5 +44,6 @@ __all__ = [
     "UserCreate",
     "ClipboardCreate",
     "ClipboardResponse",
+    "ClipboardMeta",
     "TokenSchema",
 ]

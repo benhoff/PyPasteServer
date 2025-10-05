@@ -10,7 +10,7 @@ import ctypes
 import errno
 import os
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 # ===== UAPI constants (mirroring include/uapi/kclip_uapi.h) =====
 KCLIP_ABI_VERSION = 1
@@ -245,3 +245,35 @@ def message_text(message: Message) -> str:
         return ""
     return part.data.decode("utf-8", errors="replace")
 
+
+def meta_to_payload(meta: Optional[KclipMeta]) -> Optional[dict[str, int | str]]:
+    """Convert a :class:`KclipMeta` into a serialisable dict.
+
+    Empty strings and ``None`` fields are stripped so callers can send a tidy
+    metadata blob alongside clipboard updates.
+    """
+
+    if meta is None:
+        return None
+
+    def _decode_comm(raw_meta: KclipMeta) -> str:
+        buf = bytes(raw_meta.comm)
+        head = buf.split(b"\x00", 1)[0]
+        return head.decode("utf-8", errors="ignore").strip()
+
+    payload: dict[str, int | str | None] = {
+        "ts_ns": int(meta.ts_ns),
+        "uid": int(meta.uid),
+        "pid": int(meta.pid),
+        "comm": _decode_comm(meta),
+    }
+
+    cleaned: dict[str, int | str] = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value:
+            continue
+        cleaned[key] = value
+
+    return cleaned or None

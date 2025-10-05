@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from .db import Base
@@ -32,6 +32,24 @@ class Clipboard(Base):
     owner_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
 
     owner = relationship("User", back_populates="clipboard")
+    metadata_record = relationship(
+        "ClipboardMetadata",
+        uselist=False,
+        back_populates="clipboard",
+        cascade="all, delete-orphan",
+    )
+
+
+class ClipboardMetadata(Base):
+    __tablename__ = "clipboard_metadata"
+
+    clipboard_id = Column(Integer, ForeignKey("clipboards.id"), primary_key=True)
+    ts_ns = Column(BigInteger, nullable=True)
+    uid = Column(Integer, nullable=True)
+    pid = Column(Integer, nullable=True)
+    comm = Column(String(255), nullable=True)
+
+    clipboard = relationship("Clipboard", back_populates="metadata_record")
 
 
 class Token(Base):
@@ -46,4 +64,4 @@ class Token(Base):
     user = relationship("User", back_populates="tokens")
 
 
-__all__ = ["User", "Clipboard", "Token"]
+__all__ = ["User", "Clipboard", "ClipboardMetadata", "Token"]

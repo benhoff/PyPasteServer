@@ -38,8 +38,9 @@ class WSClient:
             return
         if data.get("type") in ("init", "update") and all(k in data for k in ("nonce", "ciphertext", "tag")):
             text = decrypt_message(data["nonce"], data["ciphertext"], data["tag"]) if encryption_available() else data.get("ciphertext", "")
+            meta = data.get("meta") if isinstance(data.get("meta"), dict) else None
             if text:
-                self.on_text(text)
+                self.on_text(text, meta)
 
     def _on_error(self, ws, error):
         print(f"WebSocket error: {error}")
@@ -74,12 +75,15 @@ class WSClient:
                 print("Attempting to reconnect WebSocket in 5 seconds...")
                 time.sleep(5)
 
-    def send_update(self, text: str):
+    def send_update(self, text: str, meta: dict | None = None):
         if not (self.ws and self.ws.sock and self.ws.sock.connected):
             return
         msg = encrypt_message(text) if encryption_available() else {"nonce": "", "ciphertext": text, "tag": ""}
+        payload = {"type": "update", **msg}
+        if meta:
+            payload["meta"] = meta
         try:
-            self.ws.send(json.dumps({"type": "update", **msg}))
+            self.ws.send(json.dumps(payload))
         except Exception as e:
             print(f"Failed to send clipboard update: {e}")
 
@@ -87,4 +91,3 @@ class WSClient:
         self.stop_event.set()
         if self.ws:
             self.ws.close()
-

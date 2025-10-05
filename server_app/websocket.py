@@ -48,6 +48,18 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         db = SessionLocal()
         clipboard = db.query(Clipboard).filter(Clipboard.owner_id == user.id).first()
         if clipboard:
+            meta_payload = None
+            if clipboard.metadata_record:
+                meta_payload = {
+                    key: value
+                    for key, value in {
+                        "ts_ns": clipboard.metadata_record.ts_ns,
+                        "uid": clipboard.metadata_record.uid,
+                        "pid": clipboard.metadata_record.pid,
+                        "comm": clipboard.metadata_record.comm,
+                    }.items()
+                    if value is not None
+                }
             init_payload = {
                 "type": "init",
                 "ciphertext": clipboard.ciphertext,
@@ -55,6 +67,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 "tag": clipboard.tag,
                 "connection_count": await manager.get_connection_count(user.id),
             }
+            if meta_payload:
+                init_payload["meta"] = meta_payload
         else:
             init_payload = {
                 "type": "init",
@@ -84,6 +98,9 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 "tag": tag,
                 "user_id": user.id,
             }
+            meta = data.get("meta")
+            if isinstance(meta, dict) and meta:
+                message["meta"] = meta
             asyncio.create_task(manager.publish_update(message))
     except WebSocketDisconnect:
         await manager.disconnect(user.id, websocket)
