@@ -40,7 +40,7 @@ def main():
     klipper = KlipperBus(on_update=on_klipper_update)
     klipper_ok = klipper.start()
 
-    dev = ClipboardDevice(path="/dev/clipboard", on_data=on_device_text)
+    dev = ClipboardDevice(path="/dev/kclip", on_data=on_device_text)
     dev_ok = dev.start()
 
     ws = WSClient(on_text=lambda s: state.update_if_changed(s, apply_to_system))
@@ -48,7 +48,7 @@ def main():
 
     methods = {
         "D-Bus": klipper_ok,
-        "/dev/clipboard": dev_ok,
+        "/dev/kclip": dev_ok,
         "WebSocket": ws_enabled,
     }
     available = [k for k, ok in methods.items() if ok]
@@ -71,4 +71,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

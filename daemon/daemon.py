@@ -15,6 +15,11 @@ import time
 import configparser
 from pathlib import Path
 
+try:
+    from .kclip import KCLIP_SLOT_DEFAULT, fetch_message, message_text
+except ImportError:  # pragma: no cover - legacy direct invocation support
+    from kclip import KCLIP_SLOT_DEFAULT, fetch_message, message_text
+
 # Attempt to import Crypto libraries
 try:
     from Crypto.Cipher import ChaCha20_Poly1305
@@ -179,40 +184,28 @@ else:
         return ciphertext_b64
 
 def read_all(fd, retry_count=MAX_RETRIES):
-    """
-    Attempts to read all available data from a non-blocking file descriptor.
-    If EWOULDBLOCK is encountered, schedules a limited number of retries.
+    """Fetch one clipboard message via kclip and return its textual payload."""
 
-    Args:
-        fd (int): The file descriptor to read from.
-        retry_count (int): The number of remaining retry attempts.
-
-    Returns:
-        str: The decoded string data read from the file descriptor.
-    """
-    data = []
     try:
-        while True:
-            chunk = os.read(fd, 4096)
-            if not chunk:
-                # No more data available
-                break
-            data.append(chunk)
+        message = fetch_message(fd, slot=KCLIP_SLOT_DEFAULT, nonblock=True)
+    except BlockingIOError:
+        return ""
     except OSError as e:
         if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
             if retry_count > 0:
-                # Schedule a retry with decremented retry_count
                 GLib.timeout_add(100, lambda: handle_retry_read(fd, retry_count - 1))
-                print(f"EWOULDBLOCK encountered. Retrying in 100ms... ({MAX_RETRIES - retry_count + 1}/{MAX_RETRIES})")
+                print(
+                    f"EWOULDBLOCK encountered. Retrying in 100ms... ({MAX_RETRIES - retry_count + 1}/{MAX_RETRIES})"
+                )
             else:
-                print(f"Maximum retry attempts ({MAX_RETRIES}) reached. Giving up on reading from fd {fd}.", file=sys.stderr)
-            return ""  # Return empty string as no data was read this time
-        else:
-            # An unexpected error occurred
-            raise
+                print(
+                    f"Maximum retry attempts ({MAX_RETRIES}) reached. Giving up on reading from fd {fd}.",
+                    file=sys.stderr,
+                )
+            return ""
+        raise
 
-    # Decode and return the accumulated data
-    return b''.join(data).decode('utf-8', errors='replace').strip()
+    return message_text(message)
 
 def handle_retry_read(fd, retry_count):
     """
@@ -242,7 +235,7 @@ def process_read_data(data):
     """
     global CLIPBOARD_HISTORY
     if data and data != CLIPBOARD_HISTORY:
-        print(f"Clipboard Updated (/dev/clipboard): {data}")
+        print(f"Clipboard Updated (/dev/kclip): {data}")
         CLIPBOARD_HISTORY = data
         if klipper:
             try:
@@ -275,30 +268,25 @@ def on_clipboard_history_updated():
 def sigio_handler(signum, frame):
     global CLIPBOARD_HISTORY
     global klipper
-    """Signal handler for SIGIO: triggered by asynchronous notifications from /dev/clipboard."""
-    if clipboard_fd is not None:
-        # Try reading from the device. This assumes the device 
-        # provides some readable content upon update.
+    """Signal handler for SIGIO: triggered by asynchronous notifications from /dev/kclip."""
+    if clipboard_fd is None:
+        return
+
+    while True:
         try:
-            os.lseek(clipboard_fd, 0, os.SEEK_SET)  # Reset to start if needed
             data = read_all(clipboard_fd)
-            if data:
-                print(f"Clipboard Updated (/dev/clipboard): {data}")
-                if CLIPBOARD_HISTORY == data:
-                    return
-                print(f"Clipboard Updated (D-Bus): {data}")
-                CLIPBOARD_HISTORY = data
-                if klipper:
-                    klipper.setClipboardContents(data)
-                # Send the updated clipboard content to the server if encryption and WebSocket are available
-                if ENCRYPTION_AVAILABLE:
-                    send_clipboard_update(data)
         except OSError as e:
-            print(f"Error reading /dev/clipboard: {e}", file=sys.stderr)
+            print(f"Error reading /dev/kclip: {e}", file=sys.stderr)
+            break
+
+        if not data:
+            break
+
+        process_read_data(data)
 
 def on_clipboard_device_ready(source, condition):
     """
-    Callback function triggered by GLib when /dev/clipboard is ready for reading.
+    Callback function triggered by GLib when /dev/kclip is ready for reading.
     
     Args:
         source: The file descriptor.
@@ -309,31 +297,26 @@ def on_clipboard_device_ready(source, condition):
     """
     global CLIPBOARD_HISTORY
     if condition == GLib.IO_IN:
-        try:
-            # Read the new clipboard data from /dev/clipboard
-            os.lseek(clipboard_fd, 0, os.SEEK_SET)  # Reset to start if needed
-            data = read_all(clipboard_fd)
-            if data and data != CLIPBOARD_HISTORY:
-                print(f"Clipboard Updated (/dev/clipboard): {data}")
-                CLIPBOARD_HISTORY = data
-                # Update Klipper's clipboard contents via D-Bus
-                klipper.setClipboardContents(data)
-                # Send the updated clipboard content to the server if encryption and WebSocket are available
-                if ENCRYPTION_AVAILABLE:
-                    send_clipboard_update(data)
-        except OSError as e:
-            print(f"Error reading /dev/clipboard: {e}", file=sys.stderr)
-        except dbus.DBusException as e:
-            print(f"Error setting clipboard contents in Klipper: {e}", file=sys.stderr)
+        while True:
+            try:
+                data = read_all(clipboard_fd)
+            except OSError as e:
+                print(f"Error reading /dev/kclip: {e}", file=sys.stderr)
+                break
+
+            if not data:
+                break
+
+            process_read_data(data)
     return True  # Keep the callback active
 
 def setup_clipboard_device():
     global clipboard_fd
-    # Open the /dev/clipboard device
+    # Open the /dev/kclip device
     try:
-        clipboard_fd = os.open("/dev/clipboard", os.O_RDONLY | os.O_NONBLOCK)
+        clipboard_fd = os.open("/dev/kclip", os.O_RDONLY | os.O_NONBLOCK)
     except OSError as e:
-        print(f"Failed to open /dev/clipboard: {e}", file=sys.stderr)
+        print(f"Failed to open /dev/kclip: {e}", file=sys.stderr)
         return False
         
     # Get current file flags
@@ -520,7 +503,7 @@ def main():
             )
 
     try:
-        # --- 2) /dev/clipboard device ---
+        # --- 2) /dev/kclip device ---
         device_enabled = setup_clipboard_device()
 
         # --- 3) WebSocket client ---
@@ -530,7 +513,7 @@ def main():
         # --- 4) Ensure at least two methods are up ---
         methods = {
             "D-Bus": klipper_present,
-            "/dev/clipboard": device_enabled,
+            "/dev/kclip": device_enabled,
             "WebSocket": ws_enabled
         }
         available = [name for name, ok in methods.items() if ok]
@@ -562,4 +545,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

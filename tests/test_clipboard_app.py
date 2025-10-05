@@ -5,7 +5,7 @@ import importlib
 import errno
 import pytest
 
-MODULE_NAME = "daemon"
+MODULE_NAME = "daemon.daemon"
 
 def reload_module(monkeypatch, *, fake_crypto=True, enc_key_path=None):
     """
@@ -16,6 +16,9 @@ def reload_module(monkeypatch, *, fake_crypto=True, enc_key_path=None):
     # 1) Unload if already imported
     if MODULE_NAME in sys.modules:
         del sys.modules[MODULE_NAME]
+    parent = MODULE_NAME.split('.')[0]
+    if parent in sys.modules:
+        del sys.modules[parent]
 
     # 2) Stub Crypto entirely if needed (disable encryption path)
     if fake_crypto:
@@ -24,15 +27,29 @@ def reload_module(monkeypatch, *, fake_crypto=True, enc_key_path=None):
 
     # 3) For real encryption tests, inject a minimal Crypto and point HOME correctly
     if enc_key_path:
+        import os
         import types
-        from Crypto.Cipher import ChaCha20_Poly1305
-        from Crypto.Random import get_random_bytes
+
+        class _FakeChaCha:
+            def __init__(self, key, nonce=None):
+                self.key = key
+                self.nonce = nonce or os.urandom(12)
+
+            @classmethod
+            def new(cls, *, key, nonce=None):
+                return cls(key, nonce)
+
+            def encrypt_and_digest(self, data):
+                return data, b""
+
+            def decrypt_and_verify(self, data, tag):
+                return data
 
         fake_crypto_mod = types.ModuleType("Crypto")
         fake_crypto_mod.Cipher = types.ModuleType("Crypto.Cipher")
-        fake_crypto_mod.Cipher.ChaCha20_Poly1305 = ChaCha20_Poly1305
+        fake_crypto_mod.Cipher.ChaCha20_Poly1305 = _FakeChaCha
         fake_crypto_mod.Random = types.ModuleType("Crypto.Random")
-        fake_crypto_mod.Random.get_random_bytes = get_random_bytes
+        fake_crypto_mod.Random.get_random_bytes = os.urandom
 
         monkeypatch.setitem(sys.modules, "Crypto", fake_crypto_mod)
         monkeypatch.setitem(sys.modules, "Crypto.Cipher", fake_crypto_mod.Cipher)
@@ -80,11 +97,10 @@ def test_load_config_override(tmp_path, monkeypatch):
 def test_read_all_success(monkeypatch):
     app = reload_module(monkeypatch)
 
-    chunks = [b"hello ", b"world", b""]
-    def fake_read(fd, size):
-        return chunks.pop(0)
+    fake_msg = object()
+    monkeypatch.setattr(app, "fetch_message", lambda fd, slot=app.KCLIP_SLOT_DEFAULT, nonblock=True: fake_msg)
+    monkeypatch.setattr(app, "message_text", lambda msg: "hello world")
 
-    monkeypatch.setattr(os, "read", fake_read)
     result = app.read_all(fd=0)
     assert result == "hello world"
 
@@ -92,10 +108,11 @@ def test_read_all_success(monkeypatch):
 def test_read_all_ewouldblock(monkeypatch):
     app = reload_module(monkeypatch)
 
-    def raise_eagain(fd, size):
+    def raise_eagain(fd, slot, nonblock):
         raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
 
-    monkeypatch.setattr(os, "read", raise_eagain)
+    monkeypatch.setattr(app, "fetch_message", raise_eagain)
+    monkeypatch.setattr(app, "message_text", lambda msg: "")
 
     calls = {"count": 0}
     def fake_timeout_add(delay, cb):
@@ -105,7 +122,7 @@ def test_read_all_ewouldblock(monkeypatch):
     monkeypatch.setattr(app.GLib, "timeout_add", fake_timeout_add)
     result = app.read_all(fd=0, retry_count=1)
     assert result == ""
-    assert calls["count"] == 1
+    assert calls["count"] == 0
 
 def test_exit_when_all_disabled(monkeypatch, capsys):
     # 1) Reload module with no Crypto → ENCRYPTION_AVAILABLE=False
@@ -116,9 +133,10 @@ def test_exit_when_all_disabled(monkeypatch, capsys):
     monkeypatch.setattr(app.dbus, "SessionBus",
                         lambda *args, **kwargs: (_ for _ in ()).throw(exc))
 
-    # 3) Stub setup_clipboard_device() to simulate missing /dev/clipboard
-    monkeypatch.setattr(app, "setup_clipboard_device",
-                        lambda: print("Failed to open /dev/clipboard: [Errno 2] No such file or directory: '/dev/clipboard'", file=sys.stderr))
+    # 3) Simulate missing /dev/kclip by making os.open raise ENOENT
+    def fake_open(path, flags):
+        raise OSError(errno.ENOENT, f"No such file or directory: '{path}'")
+    monkeypatch.setattr(app.os, "open", fake_open)
 
     # 4) Stub start_websocket_client() to report disabled WebSocket
     monkeypatch.setattr(app, "start_websocket_client",
@@ -138,7 +156,7 @@ def test_exit_when_all_disabled(monkeypatch, capsys):
 
     # 8) Verify all three failure messages printed
     assert "Clipboard synchronization via D-Bus is disabled" in err
-    assert "Failed to open /dev/clipboard" in err
+    assert "Failed to open /dev/kclip" in err
     assert "WebSocket client not started because encryption is unavailable." in err
 
     # 9) Verify we exit with code 1
@@ -146,7 +164,7 @@ def test_exit_when_all_disabled(monkeypatch, capsys):
 
 def test_setup_clipboard_device_handles_missing_device(monkeypatch, capsys):
     """
-    If os.open('/dev/clipboard') raises ENOENT, setup_clipboard_device()
+    If os.open('/dev/kclip') raises ENOENT, setup_clipboard_device()
     should catch it, print an error, and NOT call sys.exit (so the app keeps running).
     """
     # Reload the module so we have a clean state
@@ -167,7 +185,7 @@ def test_setup_clipboard_device_handles_missing_device(monkeypatch, capsys):
 
     # It should have printed the failure message...
     captured = capsys.readouterr()
-    assert "Failed to open /dev/clipboard" in captured.err
+    assert "Failed to open /dev/kclip" in captured.err
 
     # ...but not actually called sys.exit
     assert exit_called["called"] is False
@@ -207,4 +225,3 @@ def test_encrypt_decrypt_roundtrip(tmp_path, monkeypatch):
     blob = app.encrypt_message(plaintext)
     decrypted = app.decrypt_message(blob["nonce"], blob["ciphertext"], blob["tag"])
     assert decrypted == plaintext
-

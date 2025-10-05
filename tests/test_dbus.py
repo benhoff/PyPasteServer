@@ -1,9 +1,10 @@
 # tests/test_dbus.py
+import errno
 import sys
 import pytest
 from types import SimpleNamespace
 
-import daemon as app
+import daemon.daemon as app
 
 class FakeLoop:
     def __init__(self, run_raises=None):
@@ -30,8 +31,8 @@ def test_main_exits_if_two_methods_not_met(monkeypatch, capsys):
         def add_signal_receiver(self, *a, **k): pass
     monkeypatch.setattr(app.dbus, "SessionBus", lambda *a, **k: FakeBus())
     monkeypatch.setattr(app.dbus, "Interface", lambda proxy, **kwargs: proxy)
-    # Device disabled
-    monkeypatch.setattr(app, "setup_clipboard_device", lambda: False)
+    # Device disabled via failing os.open
+    monkeypatch.setattr(app.os, "open", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.ENOENT, "missing")))
 
     with pytest.raises(SystemExit) as exc:
         app.main()
@@ -58,7 +59,7 @@ def test_main_continues_when_two_methods_available(monkeypatch, capsys):
     app.main()
     out, err = capsys.readouterr()
     assert not exit_called["called"]
-    assert "Synchronization methods enabled: D-Bus, /dev/clipboard" in out
+    assert "Synchronization methods enabled: D-Bus, /dev/kclip" in out
 
 def test_main_registers_signal_receiver_when_dbus_available(monkeypatch, capsys):
     recorder = {}
@@ -82,4 +83,3 @@ def test_main_registers_signal_receiver_when_dbus_available(monkeypatch, capsys)
     assert recorder["path"] == "/klipper"
     out, err = capsys.readouterr()
     assert "Synchronization methods enabled" in out
-
