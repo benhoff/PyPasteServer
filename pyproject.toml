@@ -13,7 +13,8 @@ dependencies = [
     "fastapi[standard]",
     "python-jose[cryptography]",
     "passlib[bcrypt]",
-    "sqlalchemy",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
     "gunicorn",
     "redis>=4.0.0",
 ]
@@ -23,3 +24,11 @@ packages = ["server_app"]
 
 [tool.setuptools.package-dir]
 server_app = "server_app"
+
+[tool.setuptools.data-files]
+"share/pypasteserver" = ["alembic.ini"]
+"share/pypasteserver/migrations" = [
+    "migrations/env.py",
+    "migrations/script.py.mako",
+]
+"share/pypasteserver/migrations/versions" = ["migrations/versions/*.py"]

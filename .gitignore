@@ -61,6 +61,12 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Local PyPasteServer state
+clipboard.db
+clipboard.db-journal
+clipboard.db-shm
+clipboard.db-wal
+
 # Flask stuff:
 instance/
 .webassets-cache
