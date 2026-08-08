@@ -1,14 +1,14 @@
 # PyPasteServer
 
-This repository contains a FastAPI relay and migration-era Python clients:
+This repository contains the FastAPI backend for the Rust `kclip` client:
 
-- **FastAPI server** (package `pypasteserver`, code under `server_app/`) with
-  the durable, end-to-end-encrypted kclip sync-v1 relay
-- **Legacy local clipboard daemon** (package `pypasteserver-daemon`, code under
-  `daemon/`), retained while users migrate to Rust `kclipd`
+- account registration, login, logout, and JWT validation;
+- a durable, end-to-end-encrypted sync-v1 event relay; and
+- SQL-backed replay with Redis notification fanout.
 
-New desktop installations should use `kclipd` and connect to `/sync/v1`. The
-legacy `/ws` and clipboard APIs remain available during the migration window.
+Desktop clipboard state, encryption, conflict handling, and user-facing CLI
+commands live in the `dev_clipboard` repository. Its `kclipd` daemon connects
+to this server at `/sync/v1`.
 
 ---
 
@@ -65,7 +65,6 @@ Environment variables recognised by the server:
 | `REDIS_URL` | `redis://redis:6379` | Redis connection string used for websocket fanout |
 | `RUN_DATABASE_MIGRATIONS_ON_STARTUP` | `true` | Apply Alembic migrations during lifespan startup |
 | `SYNC_ENABLED` | `true` | Enable `/sync/v1` |
-| `LEGACY_WEBSOCKET_ENABLED` | `true` | Keep migration-era `/ws` enabled |
 | `SYNC_ALLOW_QUERY_TOKEN` | `false` | Temporarily allow `?token=` authentication for sync-v1 |
 | `SYNC_REQUIRE_TLS` | `false` | Require `wss` or trusted `X-Forwarded-Proto: https` |
 | `SYNC_MAX_FRAME_BYTES` | `16777216` | Maximum UTF-8 JSON frame size |
@@ -102,94 +101,13 @@ quota to reject new uploads explicitly rather than deleting history needed by
 offline clients. Wire and cryptographic contract fixtures shared with the Rust
 repository live in `fixtures/`.
 
----
-
-## Legacy daemon (desktop clipboard client)
-
-The Python daemon uses GLib/DBus bindings and the legacy WebSocket protocol. It
-is retained for controlled migration; it is not a sync-v1 client.
-
-### System prerequisites
-
-Install the platform libraries first (Ubuntu/Debian example):
-
-```bash
-sudo apt install python3-gi gir1.2-glib-2.0 dbus-python
-```
-
-### Installation
-
-Create a venv that can see the system GI modules (the `--system-site-packages` flag is the easiest option):
-
-```bash
-python3 -m venv --system-site-packages venv
-source venv/bin/activate
-pip install -e ./daemon
-```
-
-Optional extras:
-
-- `pycryptodome` + `websocket-client` provide encrypted websocket sync (already included in the package dependencies)
-- KDE Klipper integration requires DBus support (provided by the system packages above)
-
-### Running the daemon
-
-Activate the venv and launch:
-
-```bash
-source venv/bin/activate
-python -m daemon
-```
-
-Configure `~/.config/clipboard_app/config.ini` with the server URL and token locations. The CLI (`cli.py`) can generate the config, register users, and manage access tokens.
-
-### Loading the kclip kernel module
-
-The daemon reads clipboard updates from `/dev/kclip`, which is provided by the out-of-tree `kclip` kernel module (see the sibling `kclip/` project). To load it automatically at boot:
-
-1. Copy the provided modules-load configuration into place:
-
-   ```bash
-   sudo install -m 0644 conf/kclip.conf /etc/modules-load.d/pypasteserver-kclip.conf
-   sudo systemctl restart systemd-modules-load.service
-   ```
-
-2. Verify the module is loaded and the device node exists:
-
-   ```bash
-   lsmod | grep kclip
-   ls -l /dev/kclip
-   ```
-
-   If `/dev/kclip` is missing, run `sudo modprobe kclip` (after installing `kclip.ko` under `/usr/lib/modules/$(uname -r)/extra/` and running `sudo depmod`).
-
-### Running the daemon under systemd
-
-Install the unit as a system service that runs under the desktop user (update `User=`, `Group=`, `WorkingDirectory`, and `PYTHONPATH` first):
-
-```bash
-sudo install -m 0644 conf/pypasteserver-daemon.service /etc/systemd/system/pypasteserver-daemon.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now pypasteserver-daemon.service
-```
-
-Check logs with `journalctl -u pypasteserver-daemon.service -f`. If you prefer using a per-user systemd instance instead, drop the `User=`/`Group=` lines and copy the unit into `~/.config/systemd/user/` before enabling it with `systemctl --user`.
-
----
-
-## CLI utility
-
-`cli.py` exposes commands for registration, login, key management, syncing, and status. Run `python cli.py --help` for the current command list.
-
----
-
 ## Repository layout
 
 ```
 server_app/          FastAPI backend modules
-daemon/              Desktop clipboard daemon package
-cli/                 CLI helpers used by cli.py
-cli.py               Entry point for the command-line interface
+docs/                Sync-v1 server protocol specification
+fixtures/            Cross-repository protocol and encryption vectors
+migrations/          Alembic database migrations
 docker-compose.yml   Container stack (FastAPI + Redis)
 Dockerfile           Server image definition
 tests/               Pytest suite

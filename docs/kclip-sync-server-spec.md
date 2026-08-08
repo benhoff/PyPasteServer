@@ -23,7 +23,6 @@ The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are normative.
 - Recover after client, server, Redis, and network interruptions.
 - Keep account authentication and authorization in PyPasteServer.
 - Permit independent client and server releases through a versioned protocol.
-- Retain the existing API during migration.
 
 ## 3. Non-goals
 
@@ -59,13 +58,11 @@ NOT lose an event because clients can replay it from SQL.
 
 ### 5.1 Endpoint
 
-The server MUST expose a new WebSocket endpoint:
+The server MUST expose the WebSocket endpoint:
 
 ```text
 /sync/v1
 ```
-
-The endpoint MUST be separate from the legacy `/ws` endpoint during migration.
 
 Production deployments MUST use TLS (`wss://`). The server MUST authenticate
 the connection using the existing JWT access-token authority. New clients MUST
@@ -371,24 +368,12 @@ Requirements:
 Duplicate Redis delivery is harmless and SHOULD be suppressed by sequence at
 the connection layer when convenient.
 
-## 11. Legacy compatibility and migration
+## 11. Supported client surface
 
-The existing `/ws`, `/clipboard`, registration, login, logout, and token
-validation APIs remain available during migration.
-
-Recommended rollout:
-
-1. Add migrations, sync tables, and `/sync/v1` without changing `/ws`.
-2. Deploy integration tests using a Rust protocol fixture.
-3. Release `kclipd` sync disabled by default.
-4. Add credential import from the existing token and 32-byte key files.
-5. Enable Rust sync for test accounts, then general users.
-6. Stop installing and running the Python desktop daemon.
-7. Remove legacy `/ws` and the client-side Python packages only after a
-   documented deprecation period and confirmed data migration.
-
-The server repository may retain administrative tooling, but end-user login,
-key management, and clipboard commands should move to the Rust `kclip` CLI.
+The supported client APIs are registration, login, logout, token validation,
+and `/sync/v1`. The retired `/ws` and `/clipboard` endpoints and Python desktop
+client are not part of the sync-v1 server. End-user key management and
+clipboard commands belong to the Rust `kclip` CLI.
 
 ## 12. Configuration
 
@@ -399,8 +384,7 @@ The server should add explicit settings for:
 - maximum replay batch size;
 - per-connection queue bytes;
 - per-account event/storage quota;
-- rate limits; and
-- legacy endpoint enablement during migration.
+- rate limits.
 
 Secure production defaults MUST require TLS at the reverse proxy, a non-default
 JWT secret, bounded frames, and bounded connection queues.
@@ -479,5 +463,4 @@ The server portion is complete when:
 3. Retrying a push cannot create a duplicate event.
 4. An offline client resumes without missing committed events.
 5. Events remain strictly isolated by authenticated user.
-6. The legacy endpoint can remain enabled during a controlled migration.
-7. No Python desktop process is required for Rust-to-server synchronization.
+6. No Python desktop process is required for Rust-to-server synchronization.
