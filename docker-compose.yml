@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: fastapi_app
+    restart: unless-stopped
     command:
       - sh
       - -c
@@ -12,16 +13,17 @@ services:
         --worker-class server_app.worker.SyncUvicornWorker
         --bind 0.0.0.0:8001 --workers 4
     volumes:
-      - ./:/data
+      - "${PYP_SERVER_DATA_DIRECTORY:-.}:/data"
     ports:
-      - "8001:8001"
+      - "${PYP_SERVER_BIND_ADDRESS:-0.0.0.0}:${PYP_SERVER_PORT:-8001}:8001"
     environment:
-      - APP_ENV=development
+      - APP_ENV=${APP_ENV:-development}
       - DATABASE_URL=sqlite:////data/clipboard.db
-      - JWT_SECRET=supersecretkey
-      - JWT_ALGORITHM=HS256
+      - JWT_SECRET=${JWT_SECRET:-supersecretkey}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
       - REDIS_URL=redis://redis:6379
       - RUN_DATABASE_MIGRATIONS_ON_STARTUP=0
+      - SYNC_REQUIRE_TLS=${SYNC_REQUIRE_TLS:-0}
     depends_on:
       - redis
     networks:
@@ -30,6 +32,7 @@ services:
   redis:
     image: "redis:7"
     container_name: redis
+    restart: unless-stopped
     networks:
       - app_network
 

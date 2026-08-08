@@ -16,15 +16,37 @@ to this server at `/sync/v1`.
 
 ### Quick start with Docker
 
-1. Build and start the stack (server + Redis):
+For a persistent local installation, run:
+
+```bash
+./install.sh
+```
+
+The installer checks Docker, generates a private `.env` containing a random
+JWT secret, stores the SQLite database under the normal XDG data directory,
+builds the image, and starts the server and Redis in the background. It binds
+to `127.0.0.1:8001` by default. To accept clients from the local network, use:
+
+```bash
+./install.sh --listen 0.0.0.0
+```
+
+This exposes an unencrypted development endpoint. Use a TLS reverse proxy and
+`wss://` before exposing the service to the Internet. Run `./install.sh --help`
+for data-directory, port, reconfiguration, build, and startup options.
+
+To run the development stack directly instead:
+
+1. Build and start the server and Redis:
 
    ```bash
    docker compose up --build app
    ```
 
 2. The API is available on [http://localhost:8001](http://localhost:8001). The
-   SQLite database is stored at `./clipboard.db` through the development bind
-   mount and is created/migrated automatically.
+   SQLite database is created and migrated automatically. Without an
+   installer-generated `.env`, it is stored at `./clipboard.db` through the
+   development bind mount.
 
 ### Local development install
 
