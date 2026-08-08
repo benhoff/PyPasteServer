@@ -14,7 +14,6 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
-    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -41,7 +40,6 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     email_authenticated = Column(Boolean, default=False, nullable=False)
 
-    clipboard = relationship("Clipboard", uselist=False, back_populates="owner")
     tokens = relationship("Token", back_populates="user", cascade="all, delete-orphan")
     sync_state = relationship(
         "SyncUserState",
@@ -55,36 +53,6 @@ class User(Base):
     sync_cursors = relationship(
         "SyncDeviceCursor", back_populates="user", cascade="all, delete-orphan"
     )
-
-
-class Clipboard(Base):
-    __tablename__ = "clipboards"
-
-    id = Column(Integer, primary_key=True, index=True)
-    ciphertext = Column(Text, nullable=False)
-    nonce = Column(String(255), nullable=False)
-    tag = Column(String(255), nullable=False)
-    owner_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
-
-    owner = relationship("User", back_populates="clipboard")
-    metadata_record = relationship(
-        "ClipboardMetadata",
-        uselist=False,
-        back_populates="clipboard",
-        cascade="all, delete-orphan",
-    )
-
-
-class ClipboardMetadata(Base):
-    __tablename__ = "clipboard_metadata"
-
-    clipboard_id = Column(Integer, ForeignKey("clipboards.id"), primary_key=True)
-    ts_ns = Column(BigInteger, nullable=True)
-    uid = Column(Integer, nullable=True)
-    pid = Column(Integer, nullable=True)
-    comm = Column(String(255), nullable=True)
-
-    clipboard = relationship("Clipboard", back_populates="metadata_record")
 
 
 class Token(Base):
@@ -185,8 +153,6 @@ class SyncDeviceCursor(Base):
 
 __all__ = [
     "User",
-    "Clipboard",
-    "ClipboardMetadata",
     "Token",
     "SyncUserState",
     "SyncEvent",

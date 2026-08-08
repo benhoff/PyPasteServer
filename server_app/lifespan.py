@@ -8,7 +8,6 @@ from fastapi import FastAPI
 
 from .async_utils import run_sync, shutdown_sync_executor
 from .config import RUN_DATABASE_MIGRATIONS_ON_STARTUP, validate_settings
-from .manager import manager
 from .migrations import run_migrations
 from .redis_client import redis_client
 from .sync_manager import sync_manager
@@ -19,13 +18,11 @@ async def lifespan(app: FastAPI):
     validate_settings()
     if RUN_DATABASE_MIGRATIONS_ON_STARTUP:
         await run_sync(run_migrations)
-    await manager.start_listening()
     await sync_manager.start_listening()
     try:
         yield
     finally:
         await sync_manager.shutdown()
-        await manager.shutdown()
         try:
             await redis_client.aclose()
         except AttributeError:  # redis-py 4 compatibility

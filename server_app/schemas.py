@@ -1,7 +1,7 @@
 """Pydantic schemas exposed by the API."""
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 
 
 class UserCreate(BaseModel):
@@ -9,30 +9,12 @@ class UserCreate(BaseModel):
     password: str
     email: EmailStr
 
-
-class ClipboardMeta(BaseModel):
-    ts_ns: int | None = None
-    uid: int | None = None
-    pid: int | None = None
-    comm: str | None = None
-
-
-class ClipboardCreate(BaseModel):
-    ciphertext: str
-    nonce: str
-    tag: str
-    meta: ClipboardMeta | None = None
-
-
-class ClipboardResponse(BaseModel):
-    ciphertext: str
-    nonce: str
-    tag: str
-    meta: ClipboardMeta | None = None
-
-    class Config:
-        from_attributes = True
-
+    @field_validator("password")
+    @classmethod
+    def validate_bcrypt_length(cls, password: str) -> str:
+        if not password or len(password.encode("utf-8")) > 72:
+            raise ValueError("password must contain between 1 and 72 UTF-8 bytes")
+        return password
 
 
 class TokenSchema(BaseModel):
@@ -42,8 +24,5 @@ class TokenSchema(BaseModel):
 
 __all__ = [
     "UserCreate",
-    "ClipboardCreate",
-    "ClipboardResponse",
-    "ClipboardMeta",
     "TokenSchema",
 ]

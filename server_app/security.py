@@ -3,23 +3,28 @@ from __future__ import annotations
 
 import uuid
 
+import bcrypt
 from fastapi import HTTPException
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from .config import JWT_ALGORITHM, JWT_SECRET
 from .models import Token, User
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    encoded = password.encode("utf-8")
+    if len(encoded) > 72:
+        raise ValueError("password must be at most 72 UTF-8 bytes")
+    return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode("ascii")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return bcrypt.checkpw(
+            plain_password.encode("utf-8"), hashed_password.encode("ascii")
+        )
+    except (ValueError, UnicodeError):
+        return False
 
 
 def create_access_token(data: dict, db: Session) -> str:

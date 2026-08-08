@@ -1,7 +1,6 @@
-"""HTTP routes for the clipboard API."""
+"""Account authentication routes used by kclip clients."""
 from __future__ import annotations
 
-import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -9,12 +8,10 @@ from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
-from .clipboard import initialize_user_clipboard
 from .config import JWT_ALGORITHM, JWT_SECRET
 from .dependencies import get_current_user, get_db
-from .manager import manager
-from .models import Clipboard, ClipboardMetadata, Token, User
-from .schemas import ClipboardCreate, ClipboardMeta, ClipboardResponse, TokenSchema, UserCreate
+from .models import Token, User
+from .schemas import TokenSchema, UserCreate
 from .security import create_access_token, get_password_hash, verify_password
 
 router = APIRouter()
@@ -40,8 +37,6 @@ def register(user: UserCreate, db: Session = Depends(get_db)) -> TokenSchema:
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
-
-    initialize_user_clipboard(db, new_user)
 
     access_token = create_access_token({"sub": new_user.username, "user_id": new_user.id}, db=db)
     return TokenSchema(access_token=access_token, token_type="bearer")
@@ -93,104 +88,4 @@ def logout(
         return {"detail": "Successfully logged out"}
     except JWTError as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
-
-
-@router.get("/clipboard", response_model=ClipboardResponse)
-def get_clipboard(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> ClipboardResponse:
-    clipboard = db.query(Clipboard).filter(Clipboard.owner_id == current_user.id).first()
-    if not clipboard:
-        raise HTTPException(status_code=404, detail="Clipboard not found")
-    meta = None
-    if clipboard.metadata_record:
-        meta_obj = clipboard.metadata_record
-        meta = ClipboardMeta(
-            ts_ns=meta_obj.ts_ns,
-            uid=meta_obj.uid,
-            pid=meta_obj.pid,
-            comm=meta_obj.comm,
-        )
-    return ClipboardResponse(
-        ciphertext=clipboard.ciphertext,
-        nonce=clipboard.nonce,
-        tag=clipboard.tag,
-        meta=meta,
-    )
-
-
-@router.post("/clipboard", response_model=ClipboardResponse)
-def update_clipboard(
-    clipboard: ClipboardCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> ClipboardResponse:
-    clipboard_entry = db.query(Clipboard).filter(Clipboard.owner_id == current_user.id).first()
-    if not clipboard_entry:
-        clipboard_entry = Clipboard(
-            ciphertext=clipboard.ciphertext,
-            nonce=clipboard.nonce,
-            tag=clipboard.tag,
-            owner_id=current_user.id,
-        )
-        db.add(clipboard_entry)
-    else:
-        clipboard_entry.ciphertext = clipboard.ciphertext
-        clipboard_entry.nonce = clipboard.nonce
-        clipboard_entry.tag = clipboard.tag
-    meta_payload = None
-    if clipboard.meta:
-        meta_payload = clipboard.meta.dict(exclude_none=True)
-        meta_record = clipboard_entry.metadata_record
-        if not meta_record:
-            meta_record = ClipboardMetadata(clipboard=clipboard_entry)
-            db.add(meta_record)
-        meta_record.ts_ns = clipboard.meta.ts_ns
-        meta_record.uid = clipboard.meta.uid
-        meta_record.pid = clipboard.meta.pid
-        meta_record.comm = clipboard.meta.comm
-    else:
-        meta_record = clipboard_entry.metadata_record
-        if meta_record:
-            db.delete(meta_record)
-            meta_payload = None
-    db.commit()
-    db.refresh(clipboard_entry)
-
-    if meta_payload is None and clipboard_entry.metadata_record:
-        meta_payload = {
-            key: value
-            for key, value in {
-                "ts_ns": clipboard_entry.metadata_record.ts_ns,
-                "uid": clipboard_entry.metadata_record.uid,
-                "pid": clipboard_entry.metadata_record.pid,
-                "comm": clipboard_entry.metadata_record.comm,
-            }.items()
-            if value is not None
-        }
-
-    message = {
-        "type": "update",
-        "ciphertext": clipboard_entry.ciphertext,
-        "nonce": clipboard_entry.nonce,
-        "tag": clipboard_entry.tag,
-        "user_id": current_user.id,
-    }
-    if meta_payload:
-        message["meta"] = meta_payload
-    asyncio.create_task(manager.publish_update(message))
-
-    response_meta = clipboard.meta
-    if response_meta is None and meta_payload:
-        response_meta = ClipboardMeta(**meta_payload)
-
-    return ClipboardResponse(
-        ciphertext=clipboard_entry.ciphertext,
-        nonce=clipboard_entry.nonce,
-        tag=clipboard_entry.tag,
-        meta=response_meta,
-    )
-
-
 __all__ = ["router"]

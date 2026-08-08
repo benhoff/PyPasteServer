@@ -38,7 +38,6 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 # Migration switches.  Query-string bearer tokens are off by default because
 # URLs are routinely retained by access logs and reverse proxies.
 SYNC_ENABLED = _get_bool("SYNC_ENABLED", True)
-LEGACY_WEBSOCKET_ENABLED = _get_bool("LEGACY_WEBSOCKET_ENABLED", True)
 SYNC_ALLOW_QUERY_TOKEN = _get_bool("SYNC_ALLOW_QUERY_TOKEN", False)
 SYNC_REQUIRE_TLS = _get_bool("SYNC_REQUIRE_TLS", False)
 RUN_DATABASE_MIGRATIONS_ON_STARTUP = _get_bool(
@@ -119,7 +118,6 @@ __all__ = [
     "JWT_ALGORITHM",
     "REDIS_URL",
     "SYNC_ENABLED",
-    "LEGACY_WEBSOCKET_ENABLED",
     "SYNC_ALLOW_QUERY_TOKEN",
     "SYNC_REQUIRE_TLS",
     "RUN_DATABASE_MIGRATIONS_ON_STARTUP",
