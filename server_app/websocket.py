@@ -1,13 +1,14 @@
 """WebSocket endpoint for realtime clipboard sync."""
+
 from __future__ import annotations
 
 import asyncio
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status, Query
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 from jose import JWTError, jwt
 
-from .config import JWT_ALGORITHM, JWT_SECRET
+from .config import JWT_ALGORITHM, JWT_SECRET, LEGACY_WEBSOCKET_ENABLED
 from .db import SessionLocal
 from .manager import manager
 from .models import Clipboard, Token, User
@@ -17,7 +18,7 @@ router = APIRouter()
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(None)):
-    if token is None:
+    if not LEGACY_WEBSOCKET_ENABLED or token is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -33,7 +34,9 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         if not user:
             raise JWTError
 
-        token_entry = db.query(Token).filter(Token.jti == jti, Token.user_id == user.id).first()
+        token_entry = (
+            db.query(Token).filter(Token.jti == jti, Token.user_id == user.id).first()
+        )
         if not token_entry:
             raise JWTError
     except JWTError:
