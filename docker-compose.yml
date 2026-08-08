@@ -1,22 +1,27 @@
-version: "3.8"
-
 services:
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: fastapi_app
-    command: >-
-      gunicorn server_app.main:app --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8001 --workers 4
+    command:
+      - sh
+      - -c
+      - >-
+        alembic upgrade head && exec gunicorn server_app.main:app
+        --worker-class server_app.worker.SyncUvicornWorker
+        --bind 0.0.0.0:8001 --workers 4
     volumes:
-      - ./clipboard.db:/app/clipboard.db
+      - ./:/data
     ports:
       - "8001:8001"
     environment:
-      - DATABASE_URL=sqlite:////app/clipboard.db
+      - APP_ENV=development
+      - DATABASE_URL=sqlite:////data/clipboard.db
       - JWT_SECRET=supersecretkey
       - JWT_ALGORITHM=HS256
       - REDIS_URL=redis://redis:6379
+      - RUN_DATABASE_MIGRATIONS_ON_STARTUP=0
     depends_on:
       - redis
     networks:

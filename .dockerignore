@@ -1,0 +1,14 @@
+.git
+.pytest_cache
+.ruff_cache
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+venv
+.venv
+clipboard.db
+clipboard.db-journal
+clipboard.db-shm
+clipboard.db-wal

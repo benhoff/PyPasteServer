@@ -5,6 +5,8 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
+ENV DATABASE_URL=sqlite:////data/clipboard.db
+ENV RUN_DATABASE_MIGRATIONS_ON_STARTUP=0
 
 # Set work directory
 WORKDIR /app
@@ -23,14 +25,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 COPY . /app/
 
-# Copy initial clipboard.db if it exists
-COPY clipboard.db /app/clipboard.db
-
 # Declare a volume for the data directory
-VOLUME ["/app"]
+RUN mkdir -p /data
+VOLUME ["/data"]
 
 # Expose the port FastAPI is running on
 EXPOSE 8001
 
 # Command to run the FastAPI application with Gunicorn and Uvicorn workers
-CMD ["gunicorn", "server_app.main:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8001", "--workers", "4"]
+CMD ["sh", "-c", "alembic upgrade head && exec gunicorn server_app.main:app --worker-class server_app.worker.SyncUvicornWorker --bind 0.0.0.0:8001 --workers 4"]
