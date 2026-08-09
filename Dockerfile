@@ -1,6 +1,10 @@
 # Use the official Python image as the base
 FROM python:3.11-slim
 
+ARG PYP_SERVER_VERSION=0.0.0
+LABEL org.opencontainers.image.title="PyPasteServer" \
+      org.opencontainers.image.version="$PYP_SERVER_VERSION"
+
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

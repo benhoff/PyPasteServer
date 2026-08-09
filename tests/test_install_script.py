@@ -4,22 +4,44 @@ import os
 import shutil
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_VERSION = tomllib.loads(
+    (PROJECT_ROOT / "pyproject.toml").read_text()
+)["project"]["version"]
 
 
-def _run_installer(installation_root: Path, *arguments: str) -> subprocess.CompletedProcess:
+def _run_installer(
+    installation_root: Path,
+    *arguments: str,
+    installed_version: str | None = None,
+) -> subprocess.CompletedProcess:
     fake_bin = installation_root / "fake-bin"
     fake_bin.mkdir(exist_ok=True)
     fake_docker = fake_bin / "docker"
-    fake_docker.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+set -eu
+if [[ ${1:-} == compose && ${2:-} == ps && ${3:-} == --all && \
+    ${4:-} == --quiet && -n ${FAKE_CONTAINER_ID:-} ]]; then
+    printf '%s\\n' "$FAKE_CONTAINER_ID"
+elif [[ ${1:-} == inspect ]]; then
+    printf '%s\\n' "${FAKE_INSTALLED_VERSION:-}"
+fi
+exit 0
+"""
+    )
     fake_docker.chmod(0o755)
 
     environment = os.environ.copy()
     environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
     environment["HOME"] = str(installation_root / "home")
     environment.pop("XDG_DATA_HOME", None)
+    if installed_version is not None:
+        environment["FAKE_CONTAINER_ID"] = "test-container"
+        environment["FAKE_INSTALLED_VERSION"] = installed_version
 
     return subprocess.run(
         [str(installation_root / "install.sh"), *arguments],
@@ -42,6 +64,7 @@ def _settings(environment_file: Path) -> dict[str, str]:
 def test_installer_generates_private_config_and_preserves_secret(tmp_path) -> None:
     installer = tmp_path / "install.sh"
     shutil.copy2(PROJECT_ROOT / "install.sh", installer)
+    shutil.copy2(PROJECT_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     installer.chmod(0o755)
     data_directory = tmp_path / "server-data"
 
@@ -88,6 +111,7 @@ def test_installer_generates_private_config_and_preserves_secret(tmp_path) -> No
 def test_installer_records_explicit_client_facing_relay(tmp_path) -> None:
     installer = tmp_path / "install.sh"
     shutil.copy2(PROJECT_ROOT / "install.sh", installer)
+    shutil.copy2(PROJECT_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     installer.chmod(0o755)
 
     result = _run_installer(
@@ -112,6 +136,7 @@ def test_installer_records_explicit_client_facing_relay(tmp_path) -> None:
 def test_installer_requires_reconfigure_for_existing_config_changes(tmp_path) -> None:
     installer = tmp_path / "install.sh"
     shutil.copy2(PROJECT_ROOT / "install.sh", installer)
+    shutil.copy2(PROJECT_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     installer.chmod(0o755)
 
     initial = _run_installer(tmp_path, "--no-build", "--no-start")
@@ -131,6 +156,7 @@ def test_installer_requires_reconfigure_for_existing_config_changes(tmp_path) ->
 def test_installer_requires_reconfigure_for_partial_environment(tmp_path) -> None:
     installer = tmp_path / "install.sh"
     shutil.copy2(PROJECT_ROOT / "install.sh", installer)
+    shutil.copy2(PROJECT_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     installer.chmod(0o755)
     (tmp_path / ".env").write_text("JWT_SECRET=" + "a" * 64 + "\n")
 
@@ -138,3 +164,21 @@ def test_installer_requires_reconfigure_for_partial_environment(tmp_path) -> Non
 
     assert result.returncode != 0
     assert "incomplete; rerun with --reconfigure" in result.stderr
+
+
+def test_installer_reports_version_upgrade(tmp_path) -> None:
+    installer = tmp_path / "install.sh"
+    shutil.copy2(PROJECT_ROOT / "install.sh", installer)
+    installer.chmod(0o755)
+    shutil.copy2(PROJECT_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+
+    result = _run_installer(
+        tmp_path,
+        "--no-build",
+        "--no-start",
+        installed_version="0.0.0",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"Updating PyPasteServer from 0.0.0 to {PROJECT_VERSION}" in result.stdout
+    assert "Build skipped; the existing 0.0.0 image will be reused" in result.stdout

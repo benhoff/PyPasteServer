@@ -24,7 +24,8 @@ For a persistent local installation, run:
 
 The installer checks Docker, generates a private `.env` containing a random
 JWT secret, stores the SQLite database under the normal XDG data directory,
-builds the image, and starts the server and Redis in the background. It binds
+compares the deployed image version with `pyproject.toml`, builds a version-labeled
+image, and starts the server and Redis in the background. It binds
 to `127.0.0.1:8001` by default. To accept clients from the local network,
 provide both the bind address and the URL those clients will actually use:
 

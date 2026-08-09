@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        PYP_SERVER_VERSION: "${PYP_SERVER_VERSION:-0.0.0}"
     container_name: fastapi_app
     restart: unless-stopped
     command:

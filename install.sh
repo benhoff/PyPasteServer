@@ -5,6 +5,7 @@ umask 077
 
 PROJECT_DIRECTORY=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ENVIRONMENT_FILE="$PROJECT_DIRECTORY/.env"
+PROJECT_FILE="$PROJECT_DIRECTORY/pyproject.toml"
 
 START_SERVER=1
 BUILD_IMAGE=1
@@ -22,6 +23,22 @@ info() {
 fail() {
     printf 'Error: %s\n' "$*" >&2
     exit 1
+}
+
+project_version() {
+    [[ -f "$PROJECT_FILE" ]] || fail "project metadata is missing: $PROJECT_FILE"
+    awk '
+        /^\[project\][[:space:]]*$/ { in_project = 1; next }
+        /^\[/ { in_project = 0 }
+        in_project && /^[[:space:]]*version[[:space:]]*=/ {
+            value = $0
+            sub(/^[^=]*=[[:space:]]*/, "", value)
+            sub(/[[:space:]]*#.*/, "", value)
+            gsub(/^["'\'' ]+|["'\'' ]+$/, "", value)
+            print value
+            exit
+        }
+    ' "$PROJECT_FILE"
 }
 
 usage() {
@@ -107,6 +124,11 @@ while (($# > 0)); do
             ;;
     esac
 done
+
+PYP_SERVER_VERSION=$(project_version)
+[[ -n "$PYP_SERVER_VERSION" ]] || \
+    fail "project.version is missing from $PROJECT_FILE"
+export PYP_SERVER_VERSION
 
 read_setting() {
     local key=$1
@@ -238,9 +260,32 @@ docker info >/dev/null 2>&1 || \
 cd "$PROJECT_DIRECTORY"
 docker compose config >/dev/null
 
+installed_version=""
+container_id=$(docker compose ps --all --quiet app 2>/dev/null || true)
+if [[ -n "$container_id" ]]; then
+    installed_version=$(docker inspect --format \
+        '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+        "$container_id" 2>/dev/null || true)
+fi
+
+if [[ -z "$container_id" ]]; then
+    info "Installing PyPasteServer $PYP_SERVER_VERSION"
+elif [[ -z "$installed_version" || "$installed_version" == "<no value>" ]]; then
+    info "Existing installation has no version metadata"
+    info "Installing PyPasteServer $PYP_SERVER_VERSION"
+elif [[ "$installed_version" == "$PYP_SERVER_VERSION" ]]; then
+    info "PyPasteServer $PYP_SERVER_VERSION is already installed"
+else
+    info "Updating PyPasteServer from $installed_version to $PYP_SERVER_VERSION"
+fi
+
 if [[ "$BUILD_IMAGE" == 1 ]]; then
-    info "Building the PyPasteServer image"
+    info "Building the PyPasteServer $PYP_SERVER_VERSION image"
     docker compose build app
+elif [[ -n "$container_id" && -n "$installed_version" && \
+    "$installed_version" != "<no value>" && \
+    "$installed_version" != "$PYP_SERVER_VERSION" ]]; then
+    info "Build skipped; the existing $installed_version image will be reused"
 fi
 
 if [[ "$START_SERVER" == 1 ]]; then
