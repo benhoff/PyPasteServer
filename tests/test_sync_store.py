@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from server_app.db import Base
-from server_app.models import SyncDeviceCursor, SyncEvent, SyncUserState, User, utc_now
+from server_app.models import SyncEvent, SyncUserState, User, utc_now
 from server_app.sync_protocol import PushMessage, SyncProtocolError
 from server_app.sync_service import RetentionPolicy, SyncLimits, SyncStore
 
@@ -23,23 +23,11 @@ def store_context(tmp_path):
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as session:
-        user = User(
-            username="alice",
-            email="alice@example.test",
-            hashed_password="unused",
-            email_authenticated=True,
-        )
+        user = User(username="alice")
         session.add(user)
         session.flush()
         user_id = user.id
         session.add(SyncUserState(user_id=user_id, next_server_sequence=1))
-        session.add(
-            SyncDeviceCursor(
-                user_id=user_id,
-                device_id="device-a",
-                processed_server_sequence=0,
-            )
-        )
         session.commit()
     try:
         yield SyncStore(factory), factory, user_id
@@ -247,73 +235,14 @@ def test_age_retention_can_expire_the_entire_buffer(store_context) -> None:
     assert window.latest_sequence == 3
 
 
-def test_revoked_device_cannot_push_or_checkpoint(store_context) -> None:
-    store, factory, user_id = store_context
-    with factory() as session:
-        cursor = session.get(SyncDeviceCursor, (user_id, "device-a"))
-        cursor.revoked_at = utc_now()
-        session.commit()
-
-    with pytest.raises(SyncProtocolError) as push_error:
-        store.accept_event(
-            user_id=user_id,
-            device_id="device-a",
-            push=_push(),
-            limits=SyncLimits(),
-        )
-    assert push_error.value.code == "permission_denied"
-
-    with pytest.raises(SyncProtocolError) as checkpoint_error:
-        store.checkpoint(user_id, "device-a", 0)
-    assert checkpoint_error.value.code == "permission_denied"
-
-
-def test_checkpoint_is_monotonic_and_scoped_to_user(store_context) -> None:
-    store, factory, user_id = store_context
-    for index in range(1, 6):
-        store.accept_event(
-            user_id=user_id,
-            device_id="device-a",
-            push=_push(byte=index),
-            limits=SyncLimits(),
-        )
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        stored = list(
-            executor.map(
-                lambda sequence: store.checkpoint(user_id, "device-a", sequence),
-                [5, 1, 4, 2, 3],
-            )
-        )
-    assert max(stored) == 5
-    with factory() as session:
-        cursor = session.get(SyncDeviceCursor, (user_id, "device-a"))
-        assert cursor.processed_server_sequence == 5
-
-    with pytest.raises(SyncProtocolError, match="latest"):
-        store.checkpoint(user_id, "device-a", 6)
-
-
 def test_replay_and_sequences_are_isolated_per_user(store_context) -> None:
     store, factory, user_id = store_context
     with factory() as session:
-        other = User(
-            username="bob",
-            email="bob@example.test",
-            hashed_password="unused",
-            email_authenticated=True,
-        )
+        other = User(username="bob")
         session.add(other)
         session.flush()
         other_id = other.id
         session.add(SyncUserState(user_id=other_id, next_server_sequence=1))
-        session.add(
-            SyncDeviceCursor(
-                user_id=other_id,
-                device_id="device-b",
-                processed_server_sequence=0,
-            )
-        )
         session.commit()
 
     alice = store.accept_event(

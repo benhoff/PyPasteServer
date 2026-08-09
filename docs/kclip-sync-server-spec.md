@@ -1,6 +1,6 @@
 # kclip Sync Server Specification
 
-- Status: Draft 0.2
+- Status: Draft 0.4
 - Audience: PyPasteServer and kclip maintainers
 - Companion specification: `dev_clipboard/docs/pypasteserver-sync-client-spec.md`
 
@@ -22,7 +22,7 @@ The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are normative.
 - Make retries idempotent.
 - Recover after client, server, Redis, and network interruptions.
 - Keep account authentication and authorization in PyPasteServer.
-- Permit independent client and server releases through a versioned protocol.
+- Define one required sync-v1 contract deployed with the matching Rust client.
 
 ## 3. Non-goals
 
@@ -110,19 +110,17 @@ The server MUST reject an unknown or revoked pairing ID before upgrade. After
 upgrade it MUST complete the Noise handshake before accepting any sync
 protocol message. Every application message after the handshake MUST use the
 encrypted binary framing below. A client with pairing credentials MUST NOT
-fall back to bearer authentication after a handshake failure.
-
-The legacy JWT path MAY be enabled explicitly during migration, but it MUST use
-TLS and MUST send the token in the `Authorization` header rather than a URL.
-It is disabled by default. Pairing credentials are account-scoped and revoking
+fall back to another authentication method after a handshake failure. Bearer
+headers, query-string tokens, and plaintext application messages are not
+supported by `/sync/v1`. Pairing credentials are account-scoped and revoking
 one MUST NOT revoke any other device. Every database query and fanout operation
 MUST be scoped to the authenticated user ID.
 
 ### 5.2 WebSocket messages
 
-Protocol messages are UTF-8 JSON objects inside the Noise transport. Unknown object fields MUST be ignored
-when doing so is safe. Unknown message types or unsupported protocol versions
-MUST produce a structured error.
+Protocol messages are UTF-8 JSON objects inside the Noise transport. Unknown
+object fields MUST be ignored when doing so is safe. Unknown message types or
+unsupported protocol versions MUST produce a structured error.
 
 Implementations MUST enforce configurable limits for:
 
@@ -189,6 +187,9 @@ After validating the hello, the server responds:
   "history_truncated": true
 }
 ```
+
+Every field shown is required. The server MUST NOT emit the earlier draft form
+that omitted `earliest_sequence` and `history_truncated`.
 
 `earliest_sequence` is the first event still available. When the buffer is
 empty it is one greater than `latest_sequence`. `history_truncated` is true
@@ -290,27 +291,7 @@ The client MUST durably skip through `earliest_sequence - 1`, then accept event
 delivery from `replay_from`. Expiration is informational and does not close the
 connection.
 
-### 6.6 Processing checkpoint
-
-After durably recording and successfully processing a contiguous event prefix,
-the client sends:
-
-```json
-{
-  "type": "checkpoint",
-  "server_sequence": 58
-}
-```
-
-The server stores the greatest checkpoint for `(user_id, device_id)` and MUST
-NOT move it backwards. A checkpoint is advisory for operations and future
-retention; the client's durable local cursor remains authoritative on reconnect.
-
-The client MUST NOT checkpoint an event merely because it was received. It
-checkpoints only after inbox persistence and successful application or durable
-classification as an ignorable duplicate.
-
-### 6.7 Errors
+### 6.6 Errors
 
 Recoverable protocol errors use:
 
@@ -368,8 +349,12 @@ counts, error category, and timing.
 
 ## 8. Persistence model
 
-The implementation MUST use versioned database migrations. Startup-only
-`create_all` behavior is insufficient for this protocol once deployed.
+This clean-break release establishes the single `0001_sync_baseline` migration.
+Databases stamped with the retired migration history are unsupported: startup
+MUST fail without adopting or rewriting them. An operator may archive or remove
+the old database before starting this release. Schema changes after this
+baseline MUST use forward versioned migrations; startup-only `create_all`
+behavior is insufficient once the baseline is deployed.
 
 The logical schema is:
 
@@ -403,17 +388,6 @@ Required unique constraints:
 The event columns SHOULD use binary storage after base64url decoding. The API
 must reproduce the canonical base64url form on output.
 
-### 8.3 `sync_device_cursors`
-
-- `user_id`
-- `device_id`
-- `processed_server_sequence`
-- `first_seen_at`
-- `last_seen_at`
-- optional `revoked_at`
-
-Primary key: `(user_id, device_id)`.
-
 Allocating a sequence and inserting its event MUST occur in one transaction.
 Concurrent connections for one user MUST serialize sequence allocation without
 creating duplicates or gaps caused by rolled-back transactions.
@@ -433,15 +407,15 @@ advance `earliest_retained_sequence` in the same transaction and MUST never
 reuse or renumber deleted sequences. A single newest event MAY exceed the byte
 limit so an accepted push is not immediately deleted.
 
-Device cursors do not block retention. Missing revisions, slot values, and
-tombstones on a long-offline or new device are accepted consequences. The
-server cannot select a latest event per slot because slot identity is encrypted.
-No snapshot or compaction baseline is retained.
+Client cursors do not block retention and are never stored by the server.
+Missing revisions, slot values, and tombstones on a long-offline or new device
+are accepted consequences. The server cannot select a latest event per slot
+because slot identity is encrypted. No snapshot or compaction baseline is
+retained.
 
 The server MAY additionally enforce hard account quotas. A hard quota rejects
-new pushes explicitly and is distinct from automatic rolling retention. Setting
-all rolling limits to zero disables automatic deletion for a staged client
-migration.
+new pushes explicitly and is distinct from automatic rolling retention. A zero
+value disables its individual rolling limit for operational use and testing.
 
 ## 10. Fanout and Redis
 
@@ -464,10 +438,12 @@ the connection layer when convenient.
 
 ## 11. Supported client surface
 
-The supported client APIs are registration, login, logout, token validation,
-and `/sync/v1`. The retired `/ws` and `/clipboard` endpoints and Python desktop
-client are not part of the sync-v1 server. End-user key management and
-clipboard commands belong to the Rust `kclip` CLI.
+The supported client API is the Noise-authenticated `/sync/v1` endpoint. Local
+account and device administration use the server administrator CLI. Public
+registration, password login, logout, bearer-token validation, the retired
+`/ws` and `/clipboard` endpoints, and the Python desktop client are not part of
+the sync-v1 server. End-user key management and clipboard commands belong to
+the Rust `kclip` CLI.
 
 ## 12. Configuration
 
@@ -481,8 +457,9 @@ The server should add explicit settings for:
 - rolling retention age, event count, stored bytes, and cleanup interval;
 - rate limits.
 
-Secure production defaults MUST require TLS at the reverse proxy, a non-default
-JWT secret, bounded frames, and bounded connection queues.
+Secure production defaults MUST require TLS at the reverse proxy, bounded
+frames, and bounded connection queues. `/sync/v1` MUST NOT require or issue a
+JWT or other bearer token.
 
 ## 13. Observability
 
@@ -527,15 +504,18 @@ Logs and metrics MUST NOT include plaintext or cryptographic secrets.
 - Reconnecting device resumes after its local cursor.
 - Events committed during replay follow the replay prefix in order.
 - Duplicate notifications do not duplicate events on a connection.
-- A checkpoint never moves backwards.
 - Reconnect below the retained floor reports truncation and replays from the
   earliest available event.
+- Retention passing an active connection emits `history_truncated` before
+  delivery resumes at the retained floor.
 - Retention deletes only a contiguous prefix and never reuses a sequence.
 
 ### 14.4 Security tests
 
 - One user cannot fetch or subscribe to another user's events.
-- Revoked and invalid tokens are rejected.
+- Missing, unknown, and revoked pairing credentials are rejected before the
+  WebSocket is accepted.
+- Bearer headers, query-string tokens, and plaintext sync frames are rejected.
 - Oversized frames are rejected before large allocation.
 - Secrets and payload bodies do not appear in captured logs.
 - Slow clients cannot create unbounded queues.
@@ -545,7 +525,8 @@ Logs and metrics MUST NOT include plaintext or cryptographic secrets.
 Both repositories MUST share committed protocol fixtures for:
 
 - the hello/ready exchange;
-- push, push acknowledgement, event, and checkpoint messages;
+- active `history_truncated` control messages;
+- push, push acknowledgement, and event messages;
 - XChaCha20-Poly1305 additional-data construction;
 - canonical base64url encoding; and
 - a known CBOR-envelope encryption/decryption vector.

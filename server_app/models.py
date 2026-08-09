@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     BigInteger,
-    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -25,22 +24,12 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def utc_now_naive() -> datetime:
-    """UTC timestamp compatible with the legacy timezone-naive token column."""
-
-    return datetime.now(UTC).replace(tzinfo=None)
-
-
 class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(150), unique=True, index=True, nullable=False)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    hashed_password = Column(String(255), nullable=False)
-    email_authenticated = Column(Boolean, default=False, nullable=False)
 
-    tokens = relationship("Token", back_populates="user", cascade="all, delete-orphan")
     sync_state = relationship(
         "SyncUserState",
         uselist=False,
@@ -50,24 +39,9 @@ class User(Base):
     sync_events = relationship(
         "SyncEvent", back_populates="user", cascade="all, delete-orphan"
     )
-    sync_cursors = relationship(
-        "SyncDeviceCursor", back_populates="user", cascade="all, delete-orphan"
-    )
     paired_devices = relationship(
         "PairedDevice", back_populates="user", cascade="all, delete-orphan"
     )
-
-
-class Token(Base):
-    __tablename__ = "tokens"
-
-    id = Column(Integer, primary_key=True, index=True)
-    token = Column(String(512), unique=True, nullable=False)
-    jti = Column(String(36), unique=True, nullable=False)
-    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
-    user = relationship("User", back_populates="tokens")
 
 
 class SyncUserState(Base):
@@ -142,29 +116,6 @@ class SyncEvent(Base):
     )
 
 
-class SyncDeviceCursor(Base):
-    """Advisory per-device processing checkpoint."""
-
-    __tablename__ = "sync_device_cursors"
-
-    user_id = Column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
-    )
-    device_id = Column(String(255), primary_key=True)
-    processed_server_sequence = Column(BigInteger, nullable=False, default=0)
-    first_seen_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
-    last_seen_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
-    revoked_at = Column(DateTime(timezone=True), nullable=True)
-
-    user = relationship("User", back_populates="sync_cursors")
-
-    __table_args__ = (
-        CheckConstraint(
-            "processed_server_sequence >= 0", name="ck_sync_device_cursor_nonnegative"
-        ),
-    )
-
-
 class PairedDevice(Base):
     """A per-device Noise PSK provisioned through the local admin CLI."""
 
@@ -187,11 +138,9 @@ class PairedDevice(Base):
 
 
 __all__ = [
-    "User",
-    "Token",
-    "SyncUserState",
-    "SyncEvent",
-    "SyncDeviceCursor",
     "PairedDevice",
+    "SyncEvent",
+    "SyncUserState",
+    "User",
     "utc_now",
 ]

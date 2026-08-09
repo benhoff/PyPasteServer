@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from server_app.sync_protocol import (
-    CheckpointMessage,
     HelloMessage,
     PushMessage,
     SyncProtocolError,
@@ -53,7 +52,7 @@ def test_crypto_fixture_matches_companion_repository_when_available() -> None:
 def test_wire_fixture_matches_companion_repository_when_available() -> None:
     local = FIXTURES / "sync-wire-v1.json"
     assert sha256(local.read_bytes()).hexdigest() == (
-        "5562f5895d6b0bb17fd2028e1c98a5eea4f48d7c9fb7dcd80801fe17e500c479"
+        "e4c6646bde7f58cb30439817af76359dd9cdaf911c903c16e45d4044d1061d20"
     )
     companion = (
         FIXTURES.parent.parent / "dev_clipboard" / "fixtures" / "sync-wire-v1.json"
@@ -69,9 +68,16 @@ def test_shared_wire_fixture_matches_protocol_helpers() -> None:
     assert hello == HelloMessage(device_id="device-contract", resume_after=42)
     assert (
         ready_message(
-            connection_id="connection-contract", latest_sequence=57, resume_after=42
+            connection_id="connection-contract",
+            latest_sequence=57,
+            earliest_sequence=1,
+            resume_after=42,
         )
         == fixture["ready"]
+    )
+    assert (
+        history_truncated_message(earliest_sequence=50, latest_sequence=57)
+        == fixture["history_truncated"]
     )
 
     push = parse_client_message(fixture["push"], max_event_bytes=1024)
@@ -99,9 +105,6 @@ def test_shared_wire_fixture_matches_protocol_helpers() -> None:
         )
         == fixture["event"]
     )
-    assert parse_client_message(
-        fixture["checkpoint"], max_event_bytes=1024
-    ) == CheckpointMessage(server_sequence=58)
 
 
 def test_ready_reports_a_truncated_replay_window() -> None:
@@ -128,6 +131,23 @@ def test_ready_reports_a_truncated_replay_window() -> None:
     }
 
 
+def test_ready_reports_an_empty_retained_window() -> None:
+    assert ready_message(
+        connection_id="connection-contract",
+        latest_sequence=57,
+        earliest_sequence=58,
+        resume_after=42,
+    ) == {
+        "type": "ready",
+        "protocol_version": 1,
+        "connection_id": "connection-contract",
+        "latest_sequence": 57,
+        "earliest_sequence": 58,
+        "replay_from": 58,
+        "history_truncated": True,
+    }
+
+
 @pytest.mark.parametrize(
     ("value", "code"),
     [
@@ -149,7 +169,14 @@ def test_ready_reports_a_truncated_replay_window() -> None:
             },
             "invalid_message",
         ),
-        ({"type": "checkpoint", "server_sequence": -1}, "invalid_message"),
+        (
+            {
+                "type": "checkpoint",
+                "protocol_version": 1,
+                "server_sequence": 0,
+            },
+            "invalid_message",
+        ),
         ({"type": "unknown"}, "invalid_message"),
     ],
 )
@@ -197,9 +224,10 @@ def test_push_enforces_uuid_lengths_algorithm_and_size() -> None:
 def test_json_frames_are_bounded_objects_with_finite_numbers() -> None:
     assert (
         decode_json_frame(
-            '{"type":"checkpoint","server_sequence":0}', max_frame_bytes=100
+            '{"type":"hello","protocol_version":1,"device_id":"d","resume_after":0}',
+            max_frame_bytes=100,
         )["type"]
-        == "checkpoint"
+        == "hello"
     )
     for frame in ("[]", "not-json", '{"value": NaN}'):
         with pytest.raises(SyncProtocolError) as error:

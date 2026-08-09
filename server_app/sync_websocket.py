@@ -9,21 +9,17 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.security.utils import get_authorization_scheme_param
 
 from . import config
 from . import db as database
 from .async_utils import run_sync
 from .noise_transport import (
     NoiseWebSocketTransport,
-    PlainWebSocketTransport,
     transport_requested,
 )
 from .pairing import active_pairing, mark_pairing_used
-from .security import decode_token
 from .sync_manager import SlowConsumerError, SyncConnection, sync_manager, sync_metrics
 from .sync_protocol import (
-    CheckpointMessage,
     HelloMessage,
     PushMessage,
     SyncProtocolError,
@@ -39,23 +35,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _bearer_token(websocket: WebSocket) -> str | None:
-    scheme, credentials = get_authorization_scheme_param(
-        websocket.headers.get("authorization")
-    )
-    if scheme.lower() == "bearer" and credentials:
-        return credentials
-    if config.SYNC_ALLOW_QUERY_TOKEN:
-        return websocket.query_params.get("token")
-    return None
-
-
-def _authenticate(token: str) -> int:
-    with database.SessionLocal() as session:
-        user = decode_token(token, session)
-        return int(user.id)
-
-
 def _authenticate_pairing(pairing_id: str) -> tuple[int, bytes]:
     with database.SessionLocal() as session:
         device = active_pairing(session, pairing_id)
@@ -67,12 +46,6 @@ def _authenticate_pairing(pairing_id: str) -> tuple[int, bytes]:
 def _mark_pairing_used(pairing_id: str) -> bool:
     with database.SessionLocal() as session:
         return mark_pairing_used(session, pairing_id)
-
-
-def _is_secure(websocket: WebSocket) -> bool:
-    # A trusted proxy-header middleware should rewrite the ASGI scheme.  Do not
-    # trust a raw X-Forwarded-Proto value supplied by an arbitrary client here.
-    return websocket.url.scheme == "wss"
 
 
 async def _receive_json_message(transport: Any) -> dict[str, Any]:
@@ -102,80 +75,54 @@ def _limits() -> SyncLimits:
 
 @router.websocket("/sync/v1")
 async def sync_v1_endpoint(websocket: WebSocket) -> None:
-    pairing_mode = transport_requested(websocket.headers)
     if not config.SYNC_ENABLED:
         await websocket.close(code=1008)
         return
+    if not transport_requested(websocket.headers):
+        sync_metrics.increment("authentication_failures")
+        await websocket.close(code=1008)
+        return
 
-    pairing_id: str | None = None
-    psk: bytes | None = None
-    if pairing_mode:
-        pairing_id = websocket.headers.get("x-kclip-pairing-id")
-        if not pairing_id:
-            sync_metrics.increment("authentication_failures")
-            await websocket.close(code=1008)
-            return
-        try:
-            user_id, psk = await run_sync(_authenticate_pairing, pairing_id)
-        except HTTPException:
-            sync_metrics.increment("authentication_failures")
-            await websocket.close(code=1008)
-            return
-        except Exception as error:
-            logger.error(
-                "sync authentication backend unavailable",
-                extra={"error_type": type(error).__name__},
-            )
-            await websocket.close(code=1011)
-            return
-    else:
-        if not config.SYNC_ALLOW_LEGACY_BEARER or (
-            config.SYNC_REQUIRE_TLS and not _is_secure(websocket)
-        ):
-            await websocket.close(code=1008)
-            return
-        token = _bearer_token(websocket)
-        if token is None:
-            sync_metrics.increment("authentication_failures")
-            await websocket.close(code=1008)
-            return
-        try:
-            user_id = await run_sync(_authenticate, token)
-        except HTTPException:
-            sync_metrics.increment("authentication_failures")
-            await websocket.close(code=1008)
-            return
-        except Exception as error:
-            logger.error(
-                "sync authentication backend unavailable",
-                extra={"error_type": type(error).__name__},
-            )
-            await websocket.close(code=1011)
-            return
+    pairing_id = websocket.headers.get("x-kclip-pairing-id")
+    if not pairing_id:
+        sync_metrics.increment("authentication_failures")
+        await websocket.close(code=1008)
+        return
+    try:
+        user_id, psk = await run_sync(_authenticate_pairing, pairing_id)
+    except HTTPException:
+        sync_metrics.increment("authentication_failures")
+        await websocket.close(code=1008)
+        return
+    except Exception as error:
+        logger.error(
+            "sync authentication backend unavailable",
+            extra={"error_type": type(error).__name__},
+        )
+        await websocket.close(code=1011)
+        return
 
     await websocket.accept()
     connection: SyncConnection | None = None
-    transport: Any = PlainWebSocketTransport(websocket)
     try:
-        if pairing_mode:
-            try:
-                transport = await asyncio.wait_for(
-                    NoiseWebSocketTransport.handshake(websocket, psk=psk or b""),
-                    timeout=max(1, config.SYNC_HELLO_TIMEOUT_SECONDS),
-                )
-                if not await run_sync(_mark_pairing_used, pairing_id or ""):
-                    sync_metrics.increment("authentication_failures")
-                    await websocket.close(code=1008)
-                    return
-                sync_metrics.increment("noise_sessions")
-            except TimeoutError:
+        try:
+            transport = await asyncio.wait_for(
+                NoiseWebSocketTransport.handshake(websocket, psk=psk),
+                timeout=max(1, config.SYNC_HELLO_TIMEOUT_SECONDS),
+            )
+            if not await run_sync(_mark_pairing_used, pairing_id):
                 sync_metrics.increment("authentication_failures")
                 await websocket.close(code=1008)
                 return
-            except SyncProtocolError:
-                sync_metrics.increment("authentication_failures")
-                await websocket.close(code=1008)
-                return
+            sync_metrics.increment("noise_sessions")
+        except TimeoutError:
+            sync_metrics.increment("authentication_failures")
+            await websocket.close(code=1008)
+            return
+        except SyncProtocolError:
+            sync_metrics.increment("authentication_failures")
+            await websocket.close(code=1008)
+            return
         try:
             first_message = await asyncio.wait_for(
                 _receive_json_message(transport),
@@ -208,7 +155,6 @@ async def sync_v1_endpoint(websocket: WebSocket) -> None:
             await _send_error_before_connection(transport, error)
             return
 
-        await run_sync(sync_store.register_device, user_id, hello.device_id)
         connection = SyncConnection(
             websocket=transport,
             user_id=user_id,
@@ -263,13 +209,6 @@ async def sync_v1_endpoint(websocket: WebSocket) -> None:
                     )
                 if isinstance(message, PushMessage):
                     await _handle_push(connection, message)
-                elif isinstance(message, CheckpointMessage):
-                    await run_sync(
-                        sync_store.checkpoint,
-                        user_id,
-                        hello.device_id,
-                        message.server_sequence,
-                    )
                 invalid_messages = 0
             except SyncProtocolError as error:
                 if error.code in {"event_too_large", "rate_limited", "quota_exceeded"}:

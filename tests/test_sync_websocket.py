@@ -9,17 +9,15 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 from noise.connection import NoiseConnection
-from sqlalchemy import create_engine, delete, func, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from server_app import config, sync_websocket
 from server_app import db as database
 from server_app.models import (
     PairedDevice,
-    SyncDeviceCursor,
     SyncEvent,
     SyncUserState,
-    Token,
     User,
 )
 from server_app.noise_transport import (
@@ -29,7 +27,6 @@ from server_app.noise_transport import (
     NOISE_PROTOCOL_NAME,
     NOISE_TRANSPORT_NAME,
 )
-from server_app.security import create_access_token
 from server_app.sync_manager import SyncConnectionManager
 from server_app.sync_protocol import encode_base64url
 
@@ -43,6 +40,8 @@ class ASGIWebSocket:
         headers: dict[str, str] | None = None,
         *,
         scheme: str = "ws",
+        psk: bytes | None = None,
+        query_string: bytes = b"",
     ) -> None:
         self.app = app
         self.incoming: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -57,7 +56,7 @@ class ASGIWebSocket:
             "root_path": "",
             "path": "/sync/v1",
             "raw_path": b"/sync/v1",
-            "query_string": b"",
+            "query_string": query_string,
             "headers": [
                 (key.lower().encode("latin-1"), value.encode("latin-1"))
                 for key, value in (headers or {}).items()
@@ -67,6 +66,8 @@ class ASGIWebSocket:
         }
         self.task: asyncio.Task[None] | None = None
         self.close_code: int | None = None
+        self.psk = psk
+        self.noise_client: NoiseTestClient | None = None
 
     async def connect(self) -> bool:
         self.task = asyncio.create_task(
@@ -79,9 +80,16 @@ class ASGIWebSocket:
             await self._join()
             return False
         assert message["type"] == "websocket.accept"
+        if self.psk is not None:
+            client = NoiseTestClient(self.psk)
+            await client.handshake(self)
+            self.noise_client = client
         return True
 
     async def send_json(self, message: dict[str, Any]) -> None:
+        if self.noise_client is not None:
+            await self.noise_client.send_json(self, message)
+            return
         await self.incoming.put(
             {
                 "type": "websocket.receive",
@@ -102,6 +110,8 @@ class ASGIWebSocket:
         return bytes(message["bytes"])
 
     async def receive_json(self) -> dict[str, Any]:
+        if self.noise_client is not None:
+            return await self.noise_client.receive_json(self)
         message = await asyncio.wait_for(self.outgoing.get(), timeout=10)
         if message["type"] == "websocket.close":
             self.close_code = message.get("code", 1000)
@@ -154,9 +164,6 @@ def websocket_context(tmp_path, monkeypatch):
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(database, "SessionLocal", factory)
     monkeypatch.setattr(config, "SYNC_ENABLED", True)
-    monkeypatch.setattr(config, "SYNC_REQUIRE_TLS", False)
-    monkeypatch.setattr(config, "SYNC_ALLOW_LEGACY_BEARER", True)
-    monkeypatch.setattr(config, "SYNC_ALLOW_QUERY_TOKEN", False)
     monkeypatch.setattr(config, "SYNC_RATE_LIMIT_EVENTS", 0)
     monkeypatch.setattr(config, "SYNC_MAX_INVALID_MESSAGES", 3)
 
@@ -168,33 +175,50 @@ def websocket_context(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "publish", publish_without_redis)
     monkeypatch.setattr(sync_websocket, "sync_manager", manager)
 
-    tokens: dict[str, str] = {}
+    pairings: dict[str, tuple[str, bytes]] = {}
     with factory() as session:
-        for username in ("alice", "bob"):
-            user = User(
-                username=username,
-                email=f"{username}@example.test",
-                hashed_password="unused",
-                email_authenticated=True,
-            )
+        for index, username in enumerate(("alice", "bob"), start=1):
+            user = User(username=username)
             session.add(user)
             session.flush()
             session.add(SyncUserState(user_id=user.id, next_server_sequence=1))
-            session.commit()
-            tokens[username] = create_access_token(
-                {"sub": username, "user_id": user.id}, session
+            pairing_id = str(uuid4())
+            psk = bytes([index]) * 32
+            session.add(
+                PairedDevice(
+                    pairing_id=pairing_id,
+                    user_id=user.id,
+                    device_name=f"{username}-test-device",
+                    psk=psk,
+                )
             )
+            pairings[username] = (pairing_id, psk)
+        session.commit()
 
     app = FastAPI()
     app.include_router(sync_websocket.router)
     try:
-        yield app, factory, tokens, manager
+        yield app, factory, pairings, manager
     finally:
         engine.dispose()
 
 
-def _headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+def _socket(
+    app: FastAPI,
+    pairing: tuple[str, bytes],
+    *,
+    scheme: str = "ws",
+) -> ASGIWebSocket:
+    pairing_id, psk = pairing
+    return ASGIWebSocket(
+        app,
+        {
+            "X-Kclip-Transport": NOISE_TRANSPORT_NAME,
+            "X-Kclip-Pairing-ID": pairing_id,
+        },
+        scheme=scheme,
+        psk=psk,
+    )
 
 
 def _hello(device_id: str, resume_after: int = 0, **extra) -> dict:
@@ -244,18 +268,20 @@ class NoiseTestClient:
                 return json.loads(assembled)
 
 
-def test_push_retry_replay_checkpoint_and_user_isolation(websocket_context) -> None:
-    app, factory, tokens, _ = websocket_context
+def test_push_retry_replay_and_user_isolation(websocket_context) -> None:
+    app, factory, pairings, _ = websocket_context
     message_id = "550e8400-e29b-41d4-a716-446655440000"
 
     async def scenario() -> dict[str, Any]:
-        first = ASGIWebSocket(app, _headers(tokens["alice"]))
+        first = _socket(app, pairings["alice"])
         assert await first.connect()
         await first.send_json(_hello("device-a", future_field="ignored"))
         ready = await first.receive_json()
         assert ready["type"] == "ready"
         assert ready["latest_sequence"] == 0
+        assert ready["earliest_sequence"] == 1
         assert ready["replay_from"] == 1
+        assert ready["history_truncated"] is False
 
         await first.send_json(_push(message_id))
         assert await first.receive_json() == {
@@ -271,7 +297,7 @@ def test_push_retry_replay_checkpoint_and_user_isolation(websocket_context) -> N
         assert "user_id" not in event
         await first.disconnect()
 
-        replay = ASGIWebSocket(app, _headers(tokens["alice"]))
+        replay = _socket(app, pairings["alice"])
         assert await replay.connect()
         await replay.send_json(_hello("device-a", resume_after=0))
         assert (await replay.receive_json())["latest_sequence"] == 1
@@ -282,18 +308,15 @@ def test_push_retry_replay_checkpoint_and_user_isolation(websocket_context) -> N
         assert duplicate_ack["duplicate"] is True
         assert duplicate_ack["server_sequence"] == 1
 
-        await replay.send_json({"type": "checkpoint", "server_sequence": 1})
         await replay.send_json(_push(value=b"\x02"))
         assert (await replay.receive_json())["server_sequence"] == 2
         assert (await replay.receive_json())["server_sequence"] == 2
-        await replay.send_json({"type": "checkpoint", "server_sequence": 0})
-        # A following valid operation establishes that both checkpoints ran.
         await replay.send_json(_push(value=b"\x03"))
         assert (await replay.receive_json())["server_sequence"] == 3
         assert (await replay.receive_json())["server_sequence"] == 3
         await replay.disconnect()
 
-        resumed = ASGIWebSocket(app, _headers(tokens["alice"]))
+        resumed = _socket(app, pairings["alice"])
         assert await resumed.connect()
         await resumed.send_json(_hello("device-c", resume_after=1))
         assert (await resumed.receive_json())["latest_sequence"] == 3
@@ -301,7 +324,7 @@ def test_push_retry_replay_checkpoint_and_user_isolation(websocket_context) -> N
         assert (await resumed.receive_json())["server_sequence"] == 3
         await resumed.disconnect()
 
-        isolated = ASGIWebSocket(app, _headers(tokens["bob"]))
+        isolated = _socket(app, pairings["bob"])
         assert await isolated.connect()
         await isolated.send_json(_hello("device-b"))
         assert (await isolated.receive_json())["latest_sequence"] == 0
@@ -312,8 +335,6 @@ def test_push_retry_replay_checkpoint_and_user_isolation(websocket_context) -> N
 
     with factory() as session:
         alice = session.scalar(select(User).where(User.username == "alice"))
-        cursor = session.get(SyncDeviceCursor, (alice.id, "device-a"))
-        assert cursor.processed_server_sequence == 1
         assert (
             session.scalar(
                 select(func.count(SyncEvent.id)).where(SyncEvent.user_id == alice.id)
@@ -328,21 +349,32 @@ def test_push_retry_replay_checkpoint_and_user_isolation(websocket_context) -> N
 
 
 def test_authentication_happens_before_accept(websocket_context) -> None:
-    app, factory, tokens, _ = websocket_context
+    app, factory, pairings, _ = websocket_context
 
     async def scenario() -> None:
         missing = ASGIWebSocket(app)
         assert not await missing.connect()
         assert missing.close_code == 1008
 
-        invalid = ASGIWebSocket(app, _headers("not-a-valid-token"))
+        invalid = ASGIWebSocket(
+            app,
+            {
+                "X-Kclip-Transport": NOISE_TRANSPORT_NAME,
+                "X-Kclip-Pairing-ID": str(uuid4()),
+            },
+        )
         assert not await invalid.connect()
         assert invalid.close_code == 1008
 
         with factory() as session:
-            session.execute(delete(Token).where(Token.token == tokens["bob"]))
+            pairing_id, _ = pairings["bob"]
+            device = session.scalar(
+                select(PairedDevice).where(PairedDevice.pairing_id == pairing_id)
+            )
+            assert device is not None
+            device.revoked_at = datetime.now(UTC)
             session.commit()
-        revoked = ASGIWebSocket(app, _headers(tokens["bob"]))
+        revoked = _socket(app, pairings["bob"])
         assert not await revoked.connect()
         assert revoked.close_code == 1008
 
@@ -350,7 +382,7 @@ def test_authentication_happens_before_accept(websocket_context) -> None:
 
 
 def test_noise_pairing_authenticates_and_encrypts_every_application_frame(
-    websocket_context, monkeypatch
+    websocket_context,
 ) -> None:
     app, factory, _, _ = websocket_context
     pairing_id = "eb6b89c3-6a6f-45fa-8da7-b74ea00bbfd5"
@@ -366,11 +398,6 @@ def test_noise_pairing_authenticates_and_encrypts_every_application_frame(
             )
         )
         session.commit()
-
-    # Pairing mode remains safe over ws:// and does not need the legacy bearer
-    # compatibility switch.
-    monkeypatch.setattr(config, "SYNC_ALLOW_LEGACY_BEARER", False)
-    monkeypatch.setattr(config, "SYNC_REQUIRE_TLS", True)
 
     async def scenario() -> None:
         socket = ASGIWebSocket(
@@ -435,10 +462,10 @@ def test_revoked_pairing_is_rejected_before_accept(websocket_context) -> None:
 
 
 def test_live_fanout_reaches_same_account_only(websocket_context) -> None:
-    app, _, tokens, _ = websocket_context
+    app, _, pairings, _ = websocket_context
 
     async def ready_socket(username: str, device_id: str) -> ASGIWebSocket:
-        socket = ASGIWebSocket(app, _headers(tokens[username]))
+        socket = _socket(app, pairings[username])
         assert await socket.connect()
         await socket.send_json(_hello(device_id))
         assert (await socket.receive_json())["type"] == "ready"
@@ -468,20 +495,17 @@ def test_live_fanout_reaches_same_account_only(websocket_context) -> None:
     asyncio.run(scenario())
 
 
-def test_tls_requirement_uses_trusted_asgi_scheme(
-    websocket_context, monkeypatch
-) -> None:
-    app, _, tokens, _ = websocket_context
-    monkeypatch.setattr(config, "SYNC_REQUIRE_TLS", True)
+def test_bearer_and_query_authentication_are_not_supported(websocket_context) -> None:
+    app, _, _, _ = websocket_context
 
     async def scenario() -> None:
-        insecure = ASGIWebSocket(app, _headers(tokens["alice"]))
-        assert not await insecure.connect()
-        assert insecure.close_code == 1008
+        bearer = ASGIWebSocket(app, {"Authorization": "Bearer obsolete"})
+        assert not await bearer.connect()
+        assert bearer.close_code == 1008
 
-        secure = ASGIWebSocket(app, _headers(tokens["alice"]), scheme="wss")
-        assert await secure.connect()
-        await secure.disconnect()
+        query = ASGIWebSocket(app, query_string=b"token=obsolete")
+        assert not await query.connect()
+        assert query.close_code == 1008
 
     asyncio.run(scenario())
 
@@ -504,10 +528,10 @@ def test_tls_requirement_uses_trusted_asgi_scheme(
 def test_hello_is_required_and_versioned(
     websocket_context, first_message: dict, expected_code: str
 ) -> None:
-    app, _, tokens, _ = websocket_context
+    app, _, pairings, _ = websocket_context
 
     async def scenario() -> None:
-        socket = ASGIWebSocket(app, _headers(tokens["alice"]))
+        socket = _socket(app, pairings["alice"])
         assert await socket.connect()
         await socket.send_json(first_message)
         error = await socket.receive_json()
@@ -521,10 +545,10 @@ def test_hello_is_required_and_versioned(
 def test_invalid_messages_are_structured_and_repeated_hello_is_rejected(
     websocket_context,
 ) -> None:
-    app, _, tokens, _ = websocket_context
+    app, _, pairings, _ = websocket_context
 
     async def scenario() -> None:
-        socket = ASGIWebSocket(app, _headers(tokens["alice"]))
+        socket = _socket(app, pairings["alice"])
         assert await socket.connect()
         await socket.send_json(_hello("device-a"))
         assert (await socket.receive_json())["type"] == "ready"
@@ -546,10 +570,10 @@ def test_invalid_messages_are_structured_and_repeated_hello_is_rejected(
 
 
 def test_resume_ahead_of_durable_log_is_terminal(websocket_context) -> None:
-    app, _, tokens, _ = websocket_context
+    app, _, pairings, _ = websocket_context
 
     async def scenario() -> None:
-        socket = ASGIWebSocket(app, _headers(tokens["alice"]))
+        socket = _socket(app, pairings["alice"])
         assert await socket.connect()
         await socket.send_json(_hello("device-a", resume_after=10))
         error = await socket.receive_json()
@@ -562,13 +586,13 @@ def test_resume_ahead_of_durable_log_is_terminal(websocket_context) -> None:
 def test_reconnect_skips_events_expired_from_the_rolling_buffer(
     websocket_context, monkeypatch
 ) -> None:
-    app, _, tokens, _ = websocket_context
+    app, _, pairings, _ = websocket_context
     monkeypatch.setattr(config, "SYNC_RETENTION_MAX_AGE_SECONDS", 0)
     monkeypatch.setattr(config, "SYNC_RETENTION_MAX_EVENTS", 2)
     monkeypatch.setattr(config, "SYNC_RETENTION_MAX_STORAGE_BYTES", 0)
 
     async def scenario() -> None:
-        writer = ASGIWebSocket(app, _headers(tokens["alice"]))
+        writer = _socket(app, pairings["alice"])
         assert await writer.connect()
         await writer.send_json(_hello("device-a"))
         assert (await writer.receive_json())["type"] == "ready"
@@ -578,7 +602,7 @@ def test_reconnect_skips_events_expired_from_the_rolling_buffer(
             assert (await writer.receive_json())["type"] == "event"
         await writer.disconnect()
 
-        stale = ASGIWebSocket(app, _headers(tokens["alice"]))
+        stale = _socket(app, pairings["alice"])
         assert await stale.connect()
         await stale.send_json(_hello("device-b", resume_after=0))
         ready = await stale.receive_json()
@@ -596,7 +620,7 @@ def test_reconnect_skips_events_expired_from_the_rolling_buffer(
 def test_payload_and_exception_details_are_not_logged(
     websocket_context, monkeypatch, caplog
 ) -> None:
-    app, _, tokens, _ = websocket_context
+    app, _, pairings, _ = websocket_context
     secret = "never-log-this-ciphertext"
 
     def fail_accept_event(**kwargs):
@@ -605,7 +629,7 @@ def test_payload_and_exception_details_are_not_logged(
     monkeypatch.setattr(sync_websocket.sync_store, "accept_event", fail_accept_event)
 
     async def scenario() -> None:
-        socket = ASGIWebSocket(app, _headers(tokens["alice"]))
+        socket = _socket(app, pairings["alice"])
         assert await socket.connect()
         await socket.send_json(_hello("device-a"))
         assert (await socket.receive_json())["type"] == "ready"

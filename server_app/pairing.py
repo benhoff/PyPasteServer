@@ -16,38 +16,35 @@ from sqlalchemy.orm import Session
 
 from .models import PairedDevice, User
 
-PAIRING_CODE_PREFIX = "kclip-pair-v1"
 SETUP_CODE_PREFIX = "kclip-setup-v1"
 PAIRING_KEY_BYTES = 32
 
 
 @dataclass(frozen=True)
-class PairingCode:
+class PairingCredential:
     pairing_id: str
     psk: bytes = field(repr=False)
 
-    def encode(self) -> str:
-        secret = base64.urlsafe_b64encode(self.psk).rstrip(b"=").decode("ascii")
-        return f"{PAIRING_CODE_PREFIX}:{self.pairing_id}:{secret}"
 
-    @classmethod
-    def parse(cls, value: str) -> PairingCode:
-        parts = value.strip().split(":")
-        if len(parts) != 3 or parts[0] != PAIRING_CODE_PREFIX:
-            raise ValueError("invalid pairing code")
-        try:
-            pairing_id = str(UUID(parts[1]))
-            encoded = parts[2].encode("ascii")
-            psk = base64.b64decode(
-                encoded + b"=" * (-len(encoded) % 4),
-                altchars=b"-_",
-                validate=True,
-            )
-        except (ValueError, UnicodeError, binascii.Error) as exc:
-            raise ValueError("invalid pairing code") from exc
-        if len(psk) != PAIRING_KEY_BYTES:
-            raise ValueError("invalid pairing code")
-        return cls(pairing_id=pairing_id, psk=psk)
+def _decode_pairing_credential(
+    pairing_id: object, pairing_secret: object
+) -> PairingCredential:
+    if not isinstance(pairing_id, str) or not isinstance(pairing_secret, str):
+        raise TypeError("invalid pairing credential")
+    try:
+        canonical_id = str(UUID(pairing_id))
+        encoded = pairing_secret.encode("ascii")
+        psk = base64.b64decode(
+            encoded + b"=" * (-len(encoded) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, UnicodeError, binascii.Error) as exc:
+        raise ValueError("invalid pairing credential") from exc
+    canonical_secret = base64.urlsafe_b64encode(psk).rstrip(b"=").decode("ascii")
+    if len(psk) != PAIRING_KEY_BYTES or canonical_secret != pairing_secret:
+        raise ValueError("invalid pairing credential")
+    return PairingCredential(pairing_id=canonical_id, psk=psk)
 
 
 def validate_relay_url(value: str) -> str:
@@ -79,7 +76,7 @@ class DeviceSetupCode:
     relay_url: str
     username: str
     device_name: str
-    pairing: PairingCode = field(repr=False)
+    pairing: PairingCredential = field(repr=False)
 
     def encode(self) -> str:
         payload = json.dumps(
@@ -129,8 +126,8 @@ class DeviceSetupCode:
                 raise ValueError
             if not isinstance(device_name, str) or not device_name:
                 raise ValueError
-            pairing = PairingCode.parse(
-                f"{PAIRING_CODE_PREFIX}:{decoded['pairing_id']}:{decoded['pairing_secret']}"
+            pairing = _decode_pairing_credential(
+                decoded["pairing_id"], decoded["pairing_secret"]
             )
             relay_url = validate_relay_url(decoded["relay_url"])
         except (
@@ -152,11 +149,11 @@ class DeviceSetupCode:
 
 def create_pairing(
     session: Session, *, user: User, device_name: str
-) -> tuple[PairedDevice, PairingCode]:
+) -> tuple[PairedDevice, PairingCredential]:
     name = device_name.strip()
     if not name or len(name) > 255:
         raise ValueError("device name must contain 1 to 255 characters")
-    pairing = PairingCode(pairing_id=str(uuid4()), psk=secrets.token_bytes(32))
+    pairing = PairingCredential(pairing_id=str(uuid4()), psk=secrets.token_bytes(32))
     device = PairedDevice(
         pairing_id=pairing.pairing_id,
         user_id=user.id,
@@ -192,11 +189,10 @@ def mark_pairing_used(session: Session, pairing_id: str) -> bool:
 
 
 __all__ = [
-    "PAIRING_CODE_PREFIX",
     "PAIRING_KEY_BYTES",
     "SETUP_CODE_PREFIX",
     "DeviceSetupCode",
-    "PairingCode",
+    "PairingCredential",
     "active_pairing",
     "create_pairing",
     "mark_pairing_used",

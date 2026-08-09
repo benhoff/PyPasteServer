@@ -32,34 +32,6 @@ async def _receive_binary(websocket: WebSocket) -> bytes:
     return bytes(data)
 
 
-class PlainWebSocketTransport:
-    def __init__(self, websocket: WebSocket) -> None:
-        self.websocket = websocket
-
-    async def receive_text(self, *, max_frame_bytes: int) -> str:
-        incoming = await self.websocket.receive()
-        if incoming["type"] == "websocket.disconnect":
-            raise WebSocketDisconnect(
-                incoming.get("code", 1000), incoming.get("reason")
-            )
-        text = incoming.get("text")
-        if text is None:
-            raise SyncProtocolError(
-                "invalid_message", "binary WebSocket frames are not supported"
-            )
-        if len(text.encode("utf-8")) > max_frame_bytes:
-            raise SyncProtocolError(
-                "event_too_large", "WebSocket frame exceeds the configured limit"
-            )
-        return text
-
-    async def send_text(self, value: str) -> None:
-        await self.websocket.send_text(value)
-
-    async def close(self, *, code: int = 1000, reason: str = "") -> None:
-        await self.websocket.close(code=code, reason=reason)
-
-
 class NoiseWebSocketTransport:
     def __init__(self, websocket: WebSocket, noise: NoiseConnection) -> None:
         self.websocket = websocket
@@ -146,6 +118,5 @@ __all__ = [
     "NOISE_PROTOCOL_NAME",
     "NOISE_TRANSPORT_NAME",
     "NoiseWebSocketTransport",
-    "PlainWebSocketTransport",
     "transport_requested",
 ]

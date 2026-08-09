@@ -7,12 +7,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import case, delete, func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from . import db as database
-from .models import SyncDeviceCursor, SyncEvent, SyncUserState, utc_now
+from .models import SyncEvent, SyncUserState, utc_now
 from .sync_protocol import PushMessage, SyncProtocolError
 
 
@@ -130,92 +130,6 @@ class SyncStore:
             ).scalars()
             return [_stored_event(event) for event in events]
 
-    def register_device(self, user_id: int, device_id: str) -> None:
-        for attempt in range(3):
-            with self._session() as session:
-                try:
-                    now = utc_now()
-                    cursor = session.get(SyncDeviceCursor, (user_id, device_id))
-                    if cursor is None:
-                        cursor = SyncDeviceCursor(
-                            user_id=user_id,
-                            device_id=device_id,
-                            processed_server_sequence=0,
-                            first_seen_at=now,
-                            last_seen_at=now,
-                        )
-                        session.add(cursor)
-                    elif cursor.revoked_at is not None:
-                        raise SyncProtocolError(
-                            "permission_denied",
-                            "device has been revoked",
-                            close_code=1008,
-                        )
-                    else:
-                        cursor.last_seen_at = now
-                    session.commit()
-                    return
-                except SyncProtocolError:
-                    session.rollback()
-                    raise
-                except (IntegrityError, OperationalError):
-                    session.rollback()
-            time.sleep(0.01 * (attempt + 1))
-        raise SyncProtocolError(
-            "server_unavailable", "could not register sync device", retryable=True
-        )
-
-    def checkpoint(self, user_id: int, device_id: str, server_sequence: int) -> int:
-        with self._session() as session:
-            cursor = session.get(SyncDeviceCursor, (user_id, device_id))
-            if cursor is None:
-                raise SyncProtocolError("permission_denied", "device is not registered")
-            if cursor.revoked_at is not None:
-                raise SyncProtocolError(
-                    "permission_denied", "device has been revoked", close_code=1008
-                )
-
-            state = session.get(SyncUserState, user_id)
-            if state is None:
-                raise SyncProtocolError(
-                    "server_unavailable",
-                    "sync account state is unavailable",
-                    retryable=True,
-                )
-            latest_sequence = int(state.next_server_sequence) - 1
-            if server_sequence > latest_sequence:
-                raise SyncProtocolError(
-                    "invalid_message", "checkpoint exceeds the latest server sequence"
-                )
-
-            stored = session.execute(
-                update(SyncDeviceCursor)
-                .where(
-                    SyncDeviceCursor.user_id == user_id,
-                    SyncDeviceCursor.device_id == device_id,
-                    SyncDeviceCursor.revoked_at.is_(None),
-                )
-                .values(
-                    processed_server_sequence=case(
-                        (
-                            SyncDeviceCursor.processed_server_sequence
-                            < server_sequence,
-                            server_sequence,
-                        ),
-                        else_=SyncDeviceCursor.processed_server_sequence,
-                    ),
-                    last_seen_at=utc_now(),
-                )
-                .returning(SyncDeviceCursor.processed_server_sequence)
-            ).scalar_one_or_none()
-            if stored is None:
-                session.rollback()
-                raise SyncProtocolError(
-                    "permission_denied", "device is not permitted", close_code=1008
-                )
-            session.commit()
-            return int(stored)
-
     def accept_event(
         self,
         *,
@@ -254,7 +168,6 @@ class SyncStore:
         retention: RetentionPolicy | None,
     ) -> AcceptedEvent:
         with self._session() as session:
-            self._require_device(session, user_id, device_id)
             existing = self._find_message(session, user_id, push.message_id)
             if existing is not None:
                 return AcceptedEvent(_stored_event(existing), duplicate=True)
@@ -285,13 +198,6 @@ class SyncStore:
                 )
                 session.add(event)
 
-                cursor = session.get(SyncDeviceCursor, (user_id, device_id))
-                if cursor is None or cursor.revoked_at is not None:
-                    raise SyncProtocolError(
-                        "permission_denied", "device is not permitted", close_code=1008
-                    )
-                cursor.last_seen_at = utc_now()
-
                 session.flush()
                 if retention is not None and retention.enabled:
                     self._prune_account_in_session(session, user_id, retention)
@@ -309,14 +215,6 @@ class SyncStore:
                 raise OperationalError(
                     "sync event transaction conflict", {}, exc
                 ) from exc
-
-    @staticmethod
-    def _require_device(session: Session, user_id: int, device_id: str) -> None:
-        cursor = session.get(SyncDeviceCursor, (user_id, device_id))
-        if cursor is None or cursor.revoked_at is not None:
-            raise SyncProtocolError(
-                "permission_denied", "device is not permitted", close_code=1008
-            )
 
     @staticmethod
     def _find_message(

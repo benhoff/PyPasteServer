@@ -1,54 +1,56 @@
 from __future__ import annotations
 
+import pytest
 from alembic import command
-from sqlalchemy import create_engine, inspect, select, text
+from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
+from sqlalchemy import create_engine, inspect, text
 
 from server_app.migrations import alembic_config
-from server_app.models import SyncUserState
 
 
-def test_migrations_remove_legacy_clipboard_and_seed_existing_users(tmp_path) -> None:
-    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
-
+def test_fresh_database_uses_single_sync_baseline(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'sync.db'}")
     config = alembic_config()
-    with engine.begin() as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "0001_legacy_baseline")
-        connection.execute(
-            text(
-                "INSERT INTO users "
-                "(id, username, email, hashed_password, email_authenticated) "
-                "VALUES (7, 'legacy', 'legacy@example.test', 'unused', 1)"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO clipboards "
-                "(id, ciphertext, nonce, tag, owner_id) "
-                "VALUES (1, 'retired', 'nonce', 'tag', 7)"
-            )
-        )
+
+    revisions = list(ScriptDirectory.from_config(config).walk_revisions())
+    assert [revision.revision for revision in revisions] == ["0001_sync_baseline"]
 
     with engine.begin() as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
 
-    table_names = set(inspect(engine).get_table_names())
-    assert {
+    assert set(inspect(engine).get_table_names()) == {
         "alembic_version",
         "users",
-        "tokens",
         "sync_user_state",
         "sync_events",
-        "sync_device_cursors",
         "paired_devices",
-    }.issubset(table_names)
-    assert "clipboards" not in table_names
-    assert "clipboard_metadata" not in table_names
+    }
     with engine.connect() as connection:
-        state = connection.execute(
-            select(SyncUserState).where(SyncUserState.user_id == 7)
-        ).one()
-        assert state.next_server_sequence == 1
-        assert state.earliest_retained_sequence == 1
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "0001_sync_baseline"
+        )
+    assert {column["name"] for column in inspect(engine).get_columns("users")} == {
+        "id",
+        "username",
+    }
+    engine.dispose()
+
+
+def test_retired_migration_history_is_rejected(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'retired.db'}")
+    with engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+        )
+        connection.execute(
+            text("INSERT INTO alembic_version VALUES ('0005_sync_retention')")
+        )
+
+    config = alembic_config()
+    with engine.begin() as connection:
+        config.attributes["connection"] = connection
+        with pytest.raises(CommandError, match="0005_sync_retention"):
+            command.upgrade(config, "head")
     engine.dispose()

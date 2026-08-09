@@ -2,7 +2,7 @@
 
 This repository contains the FastAPI backend for the Rust `kclip` client:
 
-- account registration, login, logout, and JWT validation;
+- local username-scoped account and device-pairing administration;
 - a durable, end-to-end-encrypted sync-v1 event relay; and
 - SQL-backed replay with Redis notification fanout.
 
@@ -22,10 +22,10 @@ For a persistent local installation, run:
 ./install.sh
 ```
 
-The installer checks Docker, generates a private `.env` containing a random
-JWT secret, stores the SQLite database under the normal XDG data directory,
-compares the deployed image version with `pyproject.toml`, builds a version-labeled
-image, and starts the server and Redis in the background. It binds
+The installer checks Docker, writes a private `.env`, stores the SQLite database
+under the normal XDG data directory, compares the deployed image version with
+`pyproject.toml`, builds a version-labeled image, and starts the server and Redis
+in the background. It binds
 to `127.0.0.1:8001` by default. To accept clients from the local network,
 provide both the bind address and the URL those clients will actually use:
 
@@ -84,9 +84,12 @@ To run the development stack directly instead:
    ```
 
 2. The API is available on [http://localhost:8001](http://localhost:8001). The
-   SQLite database is created and migrated automatically. Without an
+   SQLite database is created from the current baseline automatically. Without an
    installer-generated `.env`, it is stored at `./clipboard.db` through the
    development bind mount.
+
+   The clean-break baseline does not adopt databases from the retired server.
+   Archive or remove an existing `clipboard.db` before starting this release.
 
 ### Local development install
 
@@ -120,16 +123,10 @@ Environment variables recognised by the server:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `APP_ENV` | `development` | Set to `production` to enforce production secret/TLS checks |
 | `DATABASE_URL` | `sqlite:///./clipboard.db` | SQLAlchemy database URL |
-| `JWT_SECRET` | `supersecretkey` | Secret used to sign JWT access tokens |
-| `JWT_ALGORITHM` | `HS256` | Signing algorithm |
 | `REDIS_URL` | `redis://redis:6379` | Redis connection string used for websocket fanout |
 | `RUN_DATABASE_MIGRATIONS_ON_STARTUP` | `true` | Apply Alembic migrations during lifespan startup |
 | `SYNC_ENABLED` | `true` | Enable `/sync/v1` |
-| `SYNC_ALLOW_QUERY_TOKEN` | `false` | Temporarily allow `?token=` authentication for sync-v1 |
-| `SYNC_ALLOW_LEGACY_BEARER` | `false` | Permit the old JWT WebSocket authentication path |
-| `SYNC_REQUIRE_TLS` | `false` | Require TLS when legacy bearer sync is enabled; Noise pairing can use `ws` |
 | `SYNC_MAX_FRAME_BYTES` | `16777216` | Maximum UTF-8 JSON frame size |
 | `SYNC_MAX_EVENT_BYTES` | `11534336` | Maximum decoded ciphertext size |
 | `SYNC_REPLAY_BATCH_SIZE` | `500` | Maximum events loaded per SQL replay query |
@@ -147,18 +144,14 @@ Environment variables recognised by the server:
 | `SYNC_RETENTION_MAX_STORAGE_BYTES` | `134217728` | Retain at most 128 MiB of opaque payloads per account; zero disables the byte limit |
 | `SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS` | `3600` | Interval between account-wide retention passes |
 
-In production, `APP_ENV=production` refuses startup unless `JWT_SECRET` is a
-non-default value of at least 32 characters and `SYNC_REQUIRE_TLS=true` when
-sync is enabled. Configure the reverse proxy to terminate TLS, enforce the same
-frame bound, and configure Uvicorn's trusted proxy IPs so it rewrites the ASGI
-scheme to `wss`; the application does not trust a raw client-supplied
-`X-Forwarded-Proto` header.
+Configure the reverse proxy to terminate TLS when exposing the relay outside a
+trusted network and enforce the same frame bound.
 
 ### kclip sync-v1
 
 Paired clients connect to `ws://HOST/sync/v1` with a public pairing ID, perform
-`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`, and then send `hello` before `push` or
-`checkpoint`. Each post-handshake JSON message is split into bounded chunks;
+`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`, and then send `hello` before `push`.
+Each post-handshake JSON message is split into bounded chunks;
 every chunk is encrypted and authenticated in a binary WebSocket frame. Noise
 transport nonces enforce strict frame order and reject replay. Fresh ephemeral
 keys give every connection new directional transport keys.
@@ -184,14 +177,10 @@ satisfied. A reconnecting client receives `earliest_sequence` and
 floor. Sequence numbers are never reused. A device that was offline beyond the
 buffer can therefore miss stale slots and old clears by design.
 
-The Rust client must support truncated replay before retention is enabled in a
-mixed-version deployment. Set all three `SYNC_RETENTION_*` limits to zero only
-as a temporary compatibility measure. Wire and cryptographic contract fixtures
-shared with the Rust repository live in `fixtures/`.
-
-The former bearer-token WebSocket mode is disabled by default. During a TLS-
-protected migration it can be enabled with `SYNC_ALLOW_LEGACY_BEARER=true` and
-`SYNC_REQUIRE_TLS=true`; do not enable it on a plaintext LAN endpoint.
+The required `ready` retention fields and `history_truncated` control message
+are the only sync-v1 contract. `/sync/v1` accepts only Noise-paired devices;
+bearer headers and query-string tokens are rejected. Wire and cryptographic
+contract fixtures shared with the Rust repository live in `fixtures/`.
 
 ## Repository layout
 

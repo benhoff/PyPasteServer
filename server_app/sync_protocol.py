@@ -82,12 +82,7 @@ class PushMessage:
     tag: bytes
 
 
-@dataclass(frozen=True, slots=True)
-class CheckpointMessage:
-    server_sequence: int
-
-
-ClientMessage = HelloMessage | PushMessage | CheckpointMessage
+ClientMessage = HelloMessage | PushMessage
 
 
 def _reject_json_constant(value: str) -> None:
@@ -248,12 +243,6 @@ def _parse_push(message: dict[str, Any], *, max_event_bytes: int) -> PushMessage
     )
 
 
-def _parse_checkpoint(message: dict[str, Any]) -> CheckpointMessage:
-    return CheckpointMessage(
-        server_sequence=_required_int(message, "server_sequence", minimum=0)
-    )
-
-
 def parse_client_message(
     message: dict[str, Any], *, max_event_bytes: int
 ) -> ClientMessage:
@@ -265,9 +254,6 @@ def parse_client_message(
         return _parse_hello(message)
     if message_type == "push":
         return _parse_push(message, max_event_bytes=max_event_bytes)
-    if message_type == "checkpoint":
-        return _parse_checkpoint(message)
-
     version = message.get("protocol_version")
     if version is not None and version != PROTOCOL_VERSION:
         raise SyncProtocolError(
@@ -281,20 +267,17 @@ def ready_message(
     connection_id: str,
     latest_sequence: int,
     resume_after: int,
-    earliest_sequence: int | None = None,
+    earliest_sequence: int,
 ) -> dict[str, Any]:
-    message: dict[str, Any] = {
+    return {
         "type": "ready",
         "protocol_version": PROTOCOL_VERSION,
         "connection_id": connection_id,
         "latest_sequence": latest_sequence,
-        "replay_from": resume_after + 1,
+        "earliest_sequence": earliest_sequence,
+        "replay_from": max(resume_after + 1, earliest_sequence),
+        "history_truncated": resume_after + 1 < earliest_sequence,
     }
-    if earliest_sequence is not None:
-        message["earliest_sequence"] = earliest_sequence
-        message["replay_from"] = max(resume_after + 1, earliest_sequence)
-        message["history_truncated"] = resume_after + 1 < earliest_sequence
-    return message
 
 
 def history_truncated_message(
@@ -354,7 +337,6 @@ __all__ = [
     "PROTOCOL_VERSION",
     "SYNC_ALGORITHM",
     "TAG_BYTES",
-    "CheckpointMessage",
     "ClientMessage",
     "HelloMessage",
     "PushMessage",

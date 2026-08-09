@@ -54,8 +54,7 @@ Options:
   --data-dir PATH   Persistent database directory
                     (default: $XDG_DATA_HOME/pypasteserver or
                     $HOME/.local/share/pypasteserver)
-  --reconfigure     Rewrite the installer-managed .env file. The existing JWT
-                    secret is preserved.
+  --reconfigure     Rewrite the installer-managed .env file.
   --no-build        Reuse the existing server image
   --no-start        Configure and build without starting the stack
   -h, --help        Show this help
@@ -157,16 +156,9 @@ default_data_directory() {
     fi
 }
 
-generate_secret() {
-    command -v od >/dev/null 2>&1 || fail "od is required to generate JWT_SECRET"
-    command -v tr >/dev/null 2>&1 || fail "tr is required to generate JWT_SECRET"
-    LC_ALL=C od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
-}
-
 existing_bind=$(read_setting PYP_SERVER_BIND_ADDRESS || true)
 existing_port=$(read_setting PYP_SERVER_PORT || true)
 existing_data=$(read_setting PYP_SERVER_DATA_DIRECTORY || true)
-existing_secret=$(read_setting JWT_SECRET || true)
 existing_public_relay=$(read_setting PYP_SERVER_PUBLIC_RELAY_URL || true)
 
 if [[ -f "$ENVIRONMENT_FILE" && "$CONFIG_OVERRIDDEN" == 1 && "$RECONFIGURE" == 0 ]]; then
@@ -176,7 +168,6 @@ fi
 SERVER_BIND_ADDRESS=${SERVER_BIND_OVERRIDE:-${existing_bind:-127.0.0.1}}
 SERVER_PORT=${SERVER_PORT_OVERRIDE:-${existing_port:-8001}}
 DATA_DIRECTORY=${DATA_DIRECTORY_OVERRIDE:-${existing_data:-$(default_data_directory)}}
-JWT_SECRET_VALUE=${existing_secret:-$(generate_secret)}
 
 derived_relay_url() {
     local bind=$1
@@ -211,9 +202,6 @@ fi
 [[ -n "$DATA_DIRECTORY" ]] || fail "data directory must not be empty"
 [[ "$DATA_DIRECTORY" != *$'\n'* && "$DATA_DIRECTORY" != *$'\r'* ]] || \
     fail "data directory must not contain a newline"
-[[ ${#JWT_SECRET_VALUE} -ge 32 ]] || \
-    fail "JWT_SECRET must contain at least 32 characters"
-
 if [[ "$DATA_DIRECTORY" != /* ]]; then
     DATA_DIRECTORY="$PROJECT_DIRECTORY/$DATA_DIRECTORY"
 fi
@@ -227,10 +215,6 @@ write_configuration() {
         printf 'PYP_SERVER_PORT=%s\n' "$SERVER_PORT"
         printf 'PYP_SERVER_PUBLIC_RELAY_URL=%s\n' "$PUBLIC_RELAY_URL"
         printf 'PYP_SERVER_DATA_DIRECTORY=%s\n' "$DATA_DIRECTORY"
-        printf 'JWT_SECRET=%s\n' "$JWT_SECRET_VALUE"
-        printf 'APP_ENV=development\n'
-        printf 'SYNC_REQUIRE_TLS=0\n'
-        printf 'SYNC_ALLOW_LEGACY_BEARER=0\n'
     } >"$temporary_file"
     chmod 600 "$temporary_file"
     mv "$temporary_file" "$ENVIRONMENT_FILE"
@@ -241,7 +225,7 @@ if [[ ! -f "$ENVIRONMENT_FILE" || "$RECONFIGURE" == 1 ]]; then
     info "Wrote private configuration to $ENVIRONMENT_FILE"
 else
     if [[ -z "$existing_bind" || -z "$existing_port" || \
-        -z "$existing_data" || -z "$existing_secret" ]]; then
+        -z "$existing_data" ]]; then
         fail "$ENVIRONMENT_FILE is not installer-managed or is incomplete; rerun with --reconfigure"
     fi
     info "Using existing configuration from $ENVIRONMENT_FILE"

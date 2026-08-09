@@ -1,9 +1,8 @@
 """Application configuration settings.
 
-The module intentionally keeps settings as simple constants so existing
-deployments can continue configuring the application exclusively through
-environment variables.  Sync limits are byte counts after UTF-8/base64
-decoding unless their name explicitly contains ``FRAME``.
+Settings are simple constants populated from environment variables. Sync
+limits are byte counts after UTF-8/base64 decoding unless their name explicitly
+contains ``FRAME``.
 """
 
 from __future__ import annotations
@@ -28,21 +27,10 @@ def _get_nonnegative_int(name: str, default: int) -> int:
     return parsed
 
 
-APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./clipboard.db")
-DEFAULT_JWT_SECRET = "supersecretkey"
-JWT_SECRET = os.getenv("JWT_SECRET", DEFAULT_JWT_SECRET)
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 
-# Migration switches.  Query-string bearer tokens are off by default because
-# URLs are routinely retained by access logs and reverse proxies.
 SYNC_ENABLED = _get_bool("SYNC_ENABLED", True)
-SYNC_ALLOW_QUERY_TOKEN = _get_bool("SYNC_ALLOW_QUERY_TOKEN", False)
-# JWT authentication exists only as an explicit migration path. Noise pairing
-# is the default because bearer credentials must not cross a plaintext LAN.
-SYNC_ALLOW_LEGACY_BEARER = _get_bool("SYNC_ALLOW_LEGACY_BEARER", False)
-SYNC_REQUIRE_TLS = _get_bool("SYNC_REQUIRE_TLS", False)
 RUN_DATABASE_MIGRATIONS_ON_STARTUP = _get_bool(
     "RUN_DATABASE_MIGRATIONS_ON_STARTUP", True
 )
@@ -121,29 +109,13 @@ def validate_settings() -> None:
                 "limiting is enabled"
             )
 
-    if APP_ENV == "production":
-        if JWT_SECRET == DEFAULT_JWT_SECRET or len(JWT_SECRET) < 32:
-            raise RuntimeError(
-                "production requires a non-default JWT_SECRET of at least 32 characters"
-            )
-        if SYNC_ENABLED and SYNC_ALLOW_LEGACY_BEARER and not SYNC_REQUIRE_TLS:
-            raise RuntimeError(
-                "production legacy bearer sync requires SYNC_REQUIRE_TLS=true"
-            )
-
 
 __all__ = [
-    "APP_ENV",
     "DATABASE_URL",
-    "DEFAULT_JWT_SECRET",
-    "JWT_ALGORITHM",
-    "JWT_SECRET",
     "REDIS_URL",
     "RUN_DATABASE_MIGRATIONS_ON_STARTUP",
     "SYNC_ACCOUNT_MAX_EVENTS",
     "SYNC_ACCOUNT_MAX_STORAGE_BYTES",
-    "SYNC_ALLOW_LEGACY_BEARER",
-    "SYNC_ALLOW_QUERY_TOKEN",
     "SYNC_DATABASE_WORKERS",
     "SYNC_ENABLED",
     "SYNC_HELLO_TIMEOUT_SECONDS",
@@ -155,7 +127,6 @@ __all__ = [
     "SYNC_RATE_LIMIT_WINDOW_SECONDS",
     "SYNC_REDIS_PUBLISH_TIMEOUT_SECONDS",
     "SYNC_REPLAY_BATCH_SIZE",
-    "SYNC_REQUIRE_TLS",
     "SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS",
     "SYNC_RETENTION_MAX_AGE_SECONDS",
     "SYNC_RETENTION_MAX_EVENTS",

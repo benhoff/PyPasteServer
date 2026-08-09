@@ -8,9 +8,9 @@ import tomllib
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_VERSION = tomllib.loads(
-    (PROJECT_ROOT / "pyproject.toml").read_text()
-)["project"]["version"]
+PROJECT_VERSION = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())[
+    "project"
+]["version"]
 
 
 def _run_installer(
@@ -61,7 +61,7 @@ def _settings(environment_file: Path) -> dict[str, str]:
     }
 
 
-def test_installer_generates_private_config_and_preserves_secret(tmp_path) -> None:
+def test_installer_generates_and_reconfigures_private_config(tmp_path) -> None:
     installer = tmp_path / "install.sh"
     shutil.copy2(PROJECT_ROOT / "install.sh", installer)
     shutil.copy2(PROJECT_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
@@ -87,8 +87,11 @@ def test_installer_generates_private_config_and_preserves_secret(tmp_path) -> No
     assert initial["PYP_SERVER_PORT"] == "8123"
     assert initial["PYP_SERVER_PUBLIC_RELAY_URL"] == "ws://127.0.0.1:8123/sync/v1"
     assert initial["PYP_SERVER_DATA_DIRECTORY"] == str(data_directory)
-    assert len(initial["JWT_SECRET"]) == 64
-    assert initial["SYNC_ALLOW_LEGACY_BEARER"] == "0"
+    assert "JWT_SECRET" not in initial
+    assert "JWT_ALGORITHM" not in initial
+    assert "SYNC_ALLOW_LEGACY_BEARER" not in initial
+    assert "SYNC_ALLOW_QUERY_TOKEN" not in initial
+    assert "SYNC_REQUIRE_TLS" not in initial
     assert stat.S_IMODE(environment_file.stat().st_mode) == 0o600
     assert stat.S_IMODE(data_directory.stat().st_mode) == 0o700
 
@@ -105,7 +108,7 @@ def test_installer_generates_private_config_and_preserves_secret(tmp_path) -> No
     updated = _settings(environment_file)
     assert updated["PYP_SERVER_PORT"] == "9000"
     assert updated["PYP_SERVER_PUBLIC_RELAY_URL"] == "ws://127.0.0.1:9000/sync/v1"
-    assert updated["JWT_SECRET"] == initial["JWT_SECRET"]
+    assert "JWT_SECRET" not in updated
 
 
 def test_installer_records_explicit_client_facing_relay(tmp_path) -> None:
@@ -158,7 +161,7 @@ def test_installer_requires_reconfigure_for_partial_environment(tmp_path) -> Non
     shutil.copy2(PROJECT_ROOT / "install.sh", installer)
     shutil.copy2(PROJECT_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     installer.chmod(0o755)
-    (tmp_path / ".env").write_text("JWT_SECRET=" + "a" * 64 + "\n")
+    (tmp_path / ".env").write_text("PYP_SERVER_PORT=8001\n")
 
     result = _run_installer(tmp_path, "--no-build", "--no-start")
 

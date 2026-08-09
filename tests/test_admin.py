@@ -68,7 +68,8 @@ def test_local_admin_creates_account_pairs_and_revokes(
         == 0
     )
     output = capsys.readouterr().out.splitlines()
-    setup = DeviceSetupCode.parse(output[-1])
+    setup_code = output[-1]
+    setup = DeviceSetupCode.parse(setup_code)
     code = setup.pairing
     assert setup.relay_url == "wss://clipboard.example.test/sync/v1"
     assert setup.username == "alice"
@@ -79,14 +80,12 @@ def test_local_admin_creates_account_pairs_and_revokes(
     assert code.pairing_id in listing
     assert "active" in listing
     assert "workstation" in listing
-    assert code.encode() not in listing
+    assert setup_code not in listing
 
     assert admin.main(["account", "list"]) == 0
     assert "alice\t1\t1" in capsys.readouterr().out
 
-    assert (
-        admin.main(["device", "revoke", "--pairing-id", code.pairing_id]) == 0
-    )
+    assert admin.main(["device", "revoke", "--pairing-id", code.pairing_id]) == 0
     capsys.readouterr()
     with factory() as session:
         user = session.scalar(select(User).where(User.username == "alice"))

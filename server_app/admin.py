@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import secrets
 from datetime import UTC, datetime
-from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -13,7 +11,6 @@ from sqlalchemy.exc import IntegrityError
 from .db import SessionLocal
 from .models import PairedDevice, SyncUserState, User
 from .pairing import DeviceSetupCode, create_pairing, validate_relay_url
-from .security import get_password_hash
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -57,18 +54,8 @@ def _create_account(args: argparse.Namespace) -> None:
     username = args.username.strip()
     if not username or len(username) > 150:
         raise ValueError("username must contain 1 to 150 characters")
-    email = f"local-{uuid4()}@pypasteserver.invalid"
-    # The random value is discarded. This account can only authenticate with a
-    # locally issued pairing credential unless an administrator resets it using
-    # some future password-management flow.
-    password_hash = get_password_hash(secrets.token_urlsafe(48))
     with SessionLocal() as session:
-        user = User(
-            username=username,
-            email=email,
-            hashed_password=password_hash,
-            email_authenticated=True,
-        )
+        user = User(username=username)
         session.add(user)
         try:
             session.flush()
