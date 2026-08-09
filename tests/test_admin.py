@@ -31,6 +31,11 @@ def test_local_admin_creates_account_pairs_and_revokes(
     )
     assert "Created account alice" in capsys.readouterr().out
 
+    assert admin.main(["list-accounts"]) == 0
+    accounts = capsys.readouterr().out
+    assert "USERNAME\tEMAIL\tACTIVE-PAIRINGS\tTOTAL-PAIRINGS" in accounts
+    assert "alice\talice@example.test\t0\t0" in accounts
+
     assert (
         admin.main(
             [
@@ -53,6 +58,9 @@ def test_local_admin_creates_account_pairs_and_revokes(
     assert "workstation" in listing
     assert code.encode() not in listing
 
+    assert admin.main(["list-accounts"]) == 0
+    assert "alice\talice@example.test\t1\t1" in capsys.readouterr().out
+
     assert admin.main(["revoke-pairing", "--pairing-id", code.pairing_id]) == 0
     capsys.readouterr()
     with factory() as session:
@@ -64,4 +72,7 @@ def test_local_admin_creates_account_pairs_and_revokes(
         assert device.user_id == user.id
         assert device.revoked_at is not None
         assert device.psk == code.psk
+
+    assert admin.main(["list-accounts"]) == 0
+    assert "alice\talice@example.test\t0\t1" in capsys.readouterr().out
     engine.dispose()

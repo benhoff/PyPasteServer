@@ -28,6 +28,8 @@ def _parser() -> argparse.ArgumentParser:
     account.add_argument("--username", required=True)
     account.add_argument("--email", required=True)
 
+    commands.add_parser("list-accounts")
+
     create = commands.add_parser(
         "create-pairing", description="Issue one pairing code for a device."
     )
@@ -76,6 +78,27 @@ def _create_account(args: argparse.Namespace) -> None:
             session.rollback()
             raise ValueError("username or email already exists") from exc
     print(f"Created account {username}")
+
+
+def _list_accounts(args: argparse.Namespace) -> None:
+    del args
+    with SessionLocal() as session:
+        users = session.scalars(select(User).order_by(User.username)).all()
+        devices = session.scalars(select(PairedDevice)).all()
+        if not users:
+            print("No accounts")
+            return
+        totals: dict[int, tuple[int, int]] = {}
+        for device in devices:
+            active, total = totals.get(device.user_id, (0, 0))
+            totals[device.user_id] = (
+                active + int(device.revoked_at is None),
+                total + 1,
+            )
+        print("USERNAME\tEMAIL\tACTIVE-PAIRINGS\tTOTAL-PAIRINGS")
+        for user in users:
+            active, total = totals.get(user.id, (0, 0))
+            print(f"{user.username}\t{user.email}\t{active}\t{total}")
 
 
 def _create_pairing(args: argparse.Namespace) -> None:
@@ -134,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         {
             "create-account": _create_account,
+            "list-accounts": _list_accounts,
             "create-pairing": _create_pairing,
             "list-pairings": _list_pairings,
             "revoke-pairing": _revoke_pairing,

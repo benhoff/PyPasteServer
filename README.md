@@ -37,25 +37,27 @@ and message sizes, so use TLS as an additional layer before exposing it to the
 Internet. Run `./install.sh --help` for data-directory, port, reconfiguration,
 build, and startup options.
 
-Create an account and one independent pairing credential per client on the
-server host:
+Run the small administration UI on the server host:
 
 ```bash
-docker compose exec app python -m server_app.admin create-account \
-  --username alice --email alice@example.test
-docker compose exec app python -m server_app.admin create-pairing \
-  --username alice --device-name laptop
+./admin.sh
 ```
 
-The second command prints a pairing code once. Transfer it to the client over
+It lists and creates accounts, creates and lists device pairings, reports
+server status, and confirms revocation. Commands can also be scripted:
+
+```bash
+./admin.sh accounts
+./admin.sh account create alice alice@example.test
+./admin.sh pair create alice laptop
+./admin.sh pair list alice
+./admin.sh pair revoke PAIRING_ID
+```
+
+The pairing command prints a pairing code once. Transfer it to the client over
 an offline channel, run `kclip auth pair`, and paste it into the hidden prompt.
-List or revoke credentials without exposing their secrets:
-
-```bash
-docker compose exec app python -m server_app.admin list-pairings --username alice
-docker compose exec app python -m server_app.admin revoke-pairing \
-  --pairing-id PAIRING_ID
-```
+The underlying `python -m server_app.admin` interface remains available inside
+the app container for automation.
 
 To run the development stack directly instead:
 
