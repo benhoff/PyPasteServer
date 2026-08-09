@@ -39,6 +39,9 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 # URLs are routinely retained by access logs and reverse proxies.
 SYNC_ENABLED = _get_bool("SYNC_ENABLED", True)
 SYNC_ALLOW_QUERY_TOKEN = _get_bool("SYNC_ALLOW_QUERY_TOKEN", False)
+# JWT authentication exists only as an explicit migration path. Noise pairing
+# is the default because bearer credentials must not cross a plaintext LAN.
+SYNC_ALLOW_LEGACY_BEARER = _get_bool("SYNC_ALLOW_LEGACY_BEARER", False)
 SYNC_REQUIRE_TLS = _get_bool("SYNC_REQUIRE_TLS", False)
 RUN_DATABASE_MIGRATIONS_ON_STARTUP = _get_bool(
     "RUN_DATABASE_MIGRATIONS_ON_STARTUP", True
@@ -106,8 +109,10 @@ def validate_settings() -> None:
             raise RuntimeError(
                 "production requires a non-default JWT_SECRET of at least 32 characters"
             )
-        if SYNC_ENABLED and not SYNC_REQUIRE_TLS:
-            raise RuntimeError("production sync requires SYNC_REQUIRE_TLS=true")
+        if SYNC_ENABLED and SYNC_ALLOW_LEGACY_BEARER and not SYNC_REQUIRE_TLS:
+            raise RuntimeError(
+                "production legacy bearer sync requires SYNC_REQUIRE_TLS=true"
+            )
 
 
 __all__ = [
@@ -119,6 +124,7 @@ __all__ = [
     "REDIS_URL",
     "SYNC_ENABLED",
     "SYNC_ALLOW_QUERY_TOKEN",
+    "SYNC_ALLOW_LEGACY_BEARER",
     "SYNC_REQUIRE_TLS",
     "RUN_DATABASE_MIGRATIONS_ON_STARTUP",
     "SYNC_MAX_FRAME_BYTES",

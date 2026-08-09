@@ -2,17 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
+from noise.connection import NoiseConnection
 from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.orm import sessionmaker
 
 from server_app import config, sync_websocket
 from server_app import db as database
-from server_app.models import SyncDeviceCursor, SyncEvent, SyncUserState, Token, User
+from server_app.models import (
+    PairedDevice,
+    SyncDeviceCursor,
+    SyncEvent,
+    SyncUserState,
+    Token,
+    User,
+)
+from server_app.noise_transport import (
+    CHUNK_CONTINUES,
+    CHUNK_FINAL,
+    MAX_CHUNK_DATA_BYTES,
+    NOISE_PROTOCOL_NAME,
+    NOISE_TRANSPORT_NAME,
+)
 from server_app.security import create_access_token
 from server_app.sync_manager import SyncConnectionManager
 from server_app.sync_protocol import encode_base64url
@@ -73,6 +89,18 @@ class ASGIWebSocket:
             }
         )
 
+    async def send_bytes(self, message: bytes) -> None:
+        await self.incoming.put({"type": "websocket.receive", "bytes": message})
+
+    async def receive_bytes(self) -> bytes:
+        message = await asyncio.wait_for(self.outgoing.get(), timeout=10)
+        if message["type"] == "websocket.close":
+            self.close_code = message.get("code", 1000)
+            raise ConnectionError(f"WebSocket closed with {self.close_code}")
+        assert message["type"] == "websocket.send"
+        assert message.get("bytes") is not None
+        return bytes(message["bytes"])
+
     async def receive_json(self) -> dict[str, Any]:
         message = await asyncio.wait_for(self.outgoing.get(), timeout=10)
         if message["type"] == "websocket.close":
@@ -127,6 +155,7 @@ def websocket_context(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "SessionLocal", factory)
     monkeypatch.setattr(config, "SYNC_ENABLED", True)
     monkeypatch.setattr(config, "SYNC_REQUIRE_TLS", False)
+    monkeypatch.setattr(config, "SYNC_ALLOW_LEGACY_BEARER", True)
     monkeypatch.setattr(config, "SYNC_ALLOW_QUERY_TOKEN", False)
     monkeypatch.setattr(config, "SYNC_RATE_LIMIT_EVENTS", 0)
     monkeypatch.setattr(config, "SYNC_MAX_INVALID_MESSAGES", 3)
@@ -176,6 +205,43 @@ def _hello(device_id: str, resume_after: int = 0, **extra) -> dict:
         "resume_after": resume_after,
         **extra,
     }
+
+
+class NoiseTestClient:
+    def __init__(self, psk: bytes) -> None:
+        self.noise = NoiseConnection.from_name(NOISE_PROTOCOL_NAME)
+        self.noise.set_as_initiator()
+        self.noise.set_psks(psk)
+        self.noise.start_handshake()
+
+    async def handshake(self, socket: ASGIWebSocket) -> None:
+        await socket.send_bytes(bytes(self.noise.write_message()))
+        self.noise.read_message(await socket.receive_bytes())
+
+    async def send_json(
+        self, socket: ASGIWebSocket, message: dict[str, Any]
+    ) -> list[bytes]:
+        data = json.dumps(message, separators=(",", ":")).encode()
+        chunks = [
+            data[offset : offset + MAX_CHUNK_DATA_BYTES]
+            for offset in range(0, len(data), MAX_CHUNK_DATA_BYTES)
+        ]
+        ciphertexts = []
+        for index, chunk in enumerate(chunks):
+            flag = CHUNK_FINAL if index == len(chunks) - 1 else CHUNK_CONTINUES
+            ciphertext = self.noise.encrypt(bytes([flag]) + chunk)
+            ciphertexts.append(ciphertext)
+            await socket.send_bytes(ciphertext)
+        return ciphertexts
+
+    async def receive_json(self, socket: ASGIWebSocket) -> dict[str, Any]:
+        assembled = bytearray()
+        while True:
+            plaintext = self.noise.decrypt(await socket.receive_bytes())
+            assert plaintext[0] in {CHUNK_CONTINUES, CHUNK_FINAL}
+            assembled.extend(plaintext[1:])
+            if plaintext[0] == CHUNK_FINAL:
+                return json.loads(assembled)
 
 
 def test_push_retry_replay_checkpoint_and_user_isolation(websocket_context) -> None:
@@ -279,6 +345,91 @@ def test_authentication_happens_before_accept(websocket_context) -> None:
         revoked = ASGIWebSocket(app, _headers(tokens["bob"]))
         assert not await revoked.connect()
         assert revoked.close_code == 1008
+
+    asyncio.run(scenario())
+
+
+def test_noise_pairing_authenticates_and_encrypts_every_application_frame(
+    websocket_context, monkeypatch
+) -> None:
+    app, factory, _, _ = websocket_context
+    pairing_id = "eb6b89c3-6a6f-45fa-8da7-b74ea00bbfd5"
+    psk = bytes(range(32))
+    with factory() as session:
+        alice = session.scalar(select(User).where(User.username == "alice"))
+        session.add(
+            PairedDevice(
+                pairing_id=pairing_id,
+                user_id=alice.id,
+                device_name="paired-laptop",
+                psk=psk,
+            )
+        )
+        session.commit()
+
+    # Pairing mode remains safe over ws:// and does not need the legacy bearer
+    # compatibility switch.
+    monkeypatch.setattr(config, "SYNC_ALLOW_LEGACY_BEARER", False)
+    monkeypatch.setattr(config, "SYNC_REQUIRE_TLS", True)
+
+    async def scenario() -> None:
+        socket = ASGIWebSocket(
+            app,
+            {
+                "X-Kclip-Transport": NOISE_TRANSPORT_NAME,
+                "X-Kclip-Pairing-ID": pairing_id,
+            },
+        )
+        assert await socket.connect()
+        client = NoiseTestClient(psk)
+        await client.handshake(socket)
+        hello_ciphertexts = await client.send_json(socket, _hello("paired-device"))
+        assert all(b'"type":"hello"' not in item for item in hello_ciphertexts)
+        ready = await client.receive_json(socket)
+        assert ready["type"] == "ready"
+
+        # Cross the Noise maximum-message boundary in both directions.
+        await client.send_json(
+            socket, _push(value=bytes([7]) * (MAX_CHUNK_DATA_BYTES * 2))
+        )
+        assert (await client.receive_json(socket))["type"] == "push_ack"
+        assert (await client.receive_json(socket))["type"] == "event"
+        await socket.disconnect()
+
+    asyncio.run(scenario())
+    with factory() as session:
+        device = session.scalar(
+            select(PairedDevice).where(PairedDevice.pairing_id == pairing_id)
+        )
+        assert device.last_used_at is not None
+
+
+def test_revoked_pairing_is_rejected_before_accept(websocket_context) -> None:
+    app, factory, _, _ = websocket_context
+    pairing_id = "bc7855f5-d611-426f-92c7-b529e29bd874"
+    with factory() as session:
+        alice = session.scalar(select(User).where(User.username == "alice"))
+        session.add(
+            PairedDevice(
+                pairing_id=pairing_id,
+                user_id=alice.id,
+                device_name="revoked-device",
+                psk=bytes(32),
+                revoked_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+    async def scenario() -> None:
+        socket = ASGIWebSocket(
+            app,
+            {
+                "X-Kclip-Transport": NOISE_TRANSPORT_NAME,
+                "X-Kclip-Pairing-ID": pairing_id,
+            },
+        )
+        assert not await socket.connect()
+        assert socket.close_code == 1008
 
     asyncio.run(scenario())
 

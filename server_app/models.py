@@ -53,6 +53,9 @@ class User(Base):
     sync_cursors = relationship(
         "SyncDeviceCursor", back_populates="user", cascade="all, delete-orphan"
     )
+    paired_devices = relationship(
+        "PairedDevice", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Token(Base):
@@ -151,11 +154,33 @@ class SyncDeviceCursor(Base):
     )
 
 
+class PairedDevice(Base):
+    """A per-device Noise PSK provisioned through the local admin CLI."""
+
+    __tablename__ = "paired_devices"
+
+    id = Column(Integer, primary_key=True)
+    pairing_id = Column(String(36), unique=True, nullable=False, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    device_name = Column(String(255), nullable=False)
+    # A Noise PSK must be available to the responder. Protect the database as
+    # credential material; this value is never returned after creation.
+    psk = Column(LargeBinary(32), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="paired_devices")
+
+
 __all__ = [
     "User",
     "Token",
     "SyncUserState",
     "SyncEvent",
     "SyncDeviceCursor",
+    "PairedDevice",
     "utc_now",
 ]

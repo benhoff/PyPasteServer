@@ -14,8 +14,12 @@ def test_production_requires_nondefault_secret_and_tls(monkeypatch) -> None:
         config.validate_settings()
 
     monkeypatch.setattr(config, "JWT_SECRET", "x" * 32)
+    monkeypatch.setattr(config, "SYNC_ALLOW_LEGACY_BEARER", True)
     with pytest.raises(RuntimeError, match="TLS"):
         config.validate_settings()
+
+    monkeypatch.setattr(config, "SYNC_ALLOW_LEGACY_BEARER", False)
+    config.validate_settings()
 
     monkeypatch.setattr(config, "SYNC_REQUIRE_TLS", True)
     config.validate_settings()

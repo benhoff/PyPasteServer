@@ -41,6 +41,7 @@ def test_migrations_remove_legacy_clipboard_and_seed_existing_users(tmp_path) ->
         "sync_user_state",
         "sync_events",
         "sync_device_cursors",
+        "paired_devices",
     }.issubset(table_names)
     assert "clipboards" not in table_names
     assert "clipboard_metadata" not in table_names
