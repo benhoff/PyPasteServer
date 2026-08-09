@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from server_app.sync_manager import SlowConsumerError, SyncConnection
-from server_app.sync_service import StoredEvent
+from server_app.sync_service import ReplayWindow, StoredEvent
 
 
 class BlockingWebSocket:
@@ -81,6 +81,12 @@ class InMemoryStore:
             event for event in self.events if after < event.server_sequence <= through
         ][:limit]
 
+    def replay_window(self, user_id: int) -> ReplayWindow:
+        return ReplayWindow(
+            earliest_sequence=self.events[0].server_sequence,
+            latest_sequence=self.events[-1].server_sequence,
+        )
+
 
 def test_live_notification_waits_behind_replay_and_deduplicates() -> None:
     async def scenario() -> None:
@@ -106,6 +112,33 @@ def test_live_notification_waits_behind_replay_and_deduplicates() -> None:
             for message in websocket.messages
             if message["type"] == "event"
         ] == [1, 2, 3]
+        await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_active_connection_skips_an_expired_prefix() -> None:
+    async def scenario() -> None:
+        websocket = CollectingWebSocket()
+        store = InMemoryStore()
+        store.events = store.events[2:]
+        connection = SyncConnection(
+            websocket=websocket,
+            user_id=1,
+            device_id="device-a",
+            resume_after=0,
+            store=store,
+        )
+        await connection.start()
+        await connection.deliver_through(3)
+        await connection.enqueue({"type": "barrier"}, wait=True)
+        assert [message["type"] for message in websocket.messages] == [
+            "history_truncated",
+            "event",
+            "barrier",
+        ]
+        assert websocket.messages[0]["earliest_sequence"] == 3
+        assert websocket.messages[1]["server_sequence"] == 3
         await connection.close()
 
     asyncio.run(scenario())

@@ -559,6 +559,40 @@ def test_resume_ahead_of_durable_log_is_terminal(websocket_context) -> None:
     asyncio.run(scenario())
 
 
+def test_reconnect_skips_events_expired_from_the_rolling_buffer(
+    websocket_context, monkeypatch
+) -> None:
+    app, _, tokens, _ = websocket_context
+    monkeypatch.setattr(config, "SYNC_RETENTION_MAX_AGE_SECONDS", 0)
+    monkeypatch.setattr(config, "SYNC_RETENTION_MAX_EVENTS", 2)
+    monkeypatch.setattr(config, "SYNC_RETENTION_MAX_STORAGE_BYTES", 0)
+
+    async def scenario() -> None:
+        writer = ASGIWebSocket(app, _headers(tokens["alice"]))
+        assert await writer.connect()
+        await writer.send_json(_hello("device-a"))
+        assert (await writer.receive_json())["type"] == "ready"
+        for value in (b"one", b"two", b"three"):
+            await writer.send_json(_push(value=value))
+            assert (await writer.receive_json())["type"] == "push_ack"
+            assert (await writer.receive_json())["type"] == "event"
+        await writer.disconnect()
+
+        stale = ASGIWebSocket(app, _headers(tokens["alice"]))
+        assert await stale.connect()
+        await stale.send_json(_hello("device-b", resume_after=0))
+        ready = await stale.receive_json()
+        assert ready["latest_sequence"] == 3
+        assert ready["earliest_sequence"] == 2
+        assert ready["replay_from"] == 2
+        assert ready["history_truncated"] is True
+        assert (await stale.receive_json())["server_sequence"] == 2
+        assert (await stale.receive_json())["server_sequence"] == 3
+        await stale.disconnect()
+
+    asyncio.run(scenario())
+
+
 def test_payload_and_exception_details_are_not_logged(
     websocket_context, monkeypatch, caplog
 ) -> None:

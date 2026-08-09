@@ -32,6 +32,7 @@ from .sync_protocol import (
     push_ack_message,
     ready_message,
 )
+from .sync_retention import configured_retention_policy
 from .sync_service import SyncLimits, sync_store
 
 logger = logging.getLogger(__name__)
@@ -216,12 +217,12 @@ async def sync_v1_endpoint(websocket: WebSocket) -> None:
         )
         await connection.start()
 
-        # Register while holding the delivery lock.  Redis notifications that
-        # race with the snapshot wait until ready + the replay prefix are queued.
+        # Register while holding the delivery lock. Redis notifications that
+        # race with the replay-window read wait until ready + replay are queued.
         async with connection.delivery_lock:
             await sync_manager.add(connection)
-            latest_sequence = await run_sync(sync_store.latest_sequence, user_id)
-            if hello.resume_after > latest_sequence:
+            replay_window = await run_sync(sync_store.replay_window, user_id)
+            if hello.resume_after > replay_window.latest_sequence:
                 raise SyncProtocolError(
                     "replay_unavailable",
                     "resume cursor is ahead of the durable event log",
@@ -230,14 +231,24 @@ async def sync_v1_endpoint(websocket: WebSocket) -> None:
             await connection.enqueue(
                 ready_message(
                     connection_id=connection.connection_id,
-                    latest_sequence=latest_sequence,
+                    latest_sequence=replay_window.latest_sequence,
+                    earliest_sequence=replay_window.earliest_sequence,
                     resume_after=hello.resume_after,
                 )
             )
-            sync_metrics.increment(
-                "replay_lag_events_total", latest_sequence - hello.resume_after
+            effective_resume = max(
+                hello.resume_after, replay_window.earliest_sequence - 1
             )
-            await connection.deliver_through_locked(latest_sequence)
+            connection.last_delivered_sequence = effective_resume
+            if effective_resume != hello.resume_after:
+                sync_metrics.increment(
+                    "truncated_replay_events", effective_resume - hello.resume_after
+                )
+            sync_metrics.increment(
+                "replay_lag_events_total",
+                replay_window.latest_sequence - effective_resume,
+            )
+            await connection.deliver_through_locked(replay_window.latest_sequence)
 
         invalid_messages = 0
         while not connection.closed:
@@ -336,6 +347,7 @@ async def _handle_push(connection: SyncConnection, push: PushMessage) -> None:
             device_id=connection.device_id,
             push=push,
             limits=_limits(),
+            retention=configured_retention_policy(),
         )
     finally:
         sync_metrics.increment(

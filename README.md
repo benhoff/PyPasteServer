@@ -142,6 +142,10 @@ Environment variables recognised by the server:
 | `SYNC_RATE_LIMIT_WINDOW_SECONDS` | `60` | Durable rate-limit window |
 | `SYNC_DATABASE_WORKERS` | `8` | Bounded workers for sync database operations |
 | `SYNC_REDIS_PUBLISH_TIMEOUT_SECONDS` | `2` | Redis notification publish timeout |
+| `SYNC_RETENTION_MAX_AGE_SECONDS` | `604800` | Retain at most seven days of events per account; zero disables the age limit |
+| `SYNC_RETENTION_MAX_EVENTS` | `1000` | Retain at most this many events per account; zero disables the count limit |
+| `SYNC_RETENTION_MAX_STORAGE_BYTES` | `134217728` | Retain at most 128 MiB of opaque payloads per account; zero disables the byte limit |
+| `SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS` | `3600` | Interval between account-wide retention passes |
 
 In production, `APP_ENV=production` refuses startup unless `JWT_SECRET` is a
 non-default value of at least 32 characters and `SYNC_REQUIRE_TLS=true` when
@@ -171,10 +175,19 @@ The server never decrypts them. SQL is the durable source of truth; Redis only
 notifies workers to load newly committed sequences, so reconnect/replay still
 works after notification loss.
 
-The event log is intentionally unpruned in protocol version 1. Configure a
-quota to reject new uploads explicitly rather than deleting history needed by
-offline clients. Wire and cryptographic contract fixtures shared with the Rust
-repository live in `fixtures/`.
+The relay is an automatic lossy rolling buffer, not permanent clipboard
+history. It keeps at most seven days, 1,000 events, and 128 MiB per account by
+default, deleting the oldest contiguous prefix until every enabled limit is
+satisfied. A reconnecting client receives `earliest_sequence` and
+`history_truncated` in `ready`; an already-connected lagging client receives a
+`history_truncated` control message before delivery resumes at the retained
+floor. Sequence numbers are never reused. A device that was offline beyond the
+buffer can therefore miss stale slots and old clears by design.
+
+The Rust client must support truncated replay before retention is enabled in a
+mixed-version deployment. Set all three `SYNC_RETENTION_*` limits to zero only
+as a temporary compatibility measure. Wire and cryptographic contract fixtures
+shared with the Rust repository live in `fixtures/`.
 
 The former bearer-token WebSocket mode is disabled by default. During a TLS-
 protected migration it can be enabled with `SYNC_ALLOW_LEGACY_BEARER=true` and

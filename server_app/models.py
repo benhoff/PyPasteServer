@@ -79,6 +79,9 @@ class SyncUserState(Base):
         Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     next_server_sequence = Column(BigInteger, nullable=False, default=1)
+    # The first sequence that may still be replayed. When no events remain it
+    # equals next_server_sequence, so an expired empty prefix stays durable.
+    earliest_retained_sequence = Column(BigInteger, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at = Column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
@@ -89,6 +92,14 @@ class SyncUserState(Base):
     __table_args__ = (
         CheckConstraint(
             "next_server_sequence >= 1", name="ck_sync_user_state_next_positive"
+        ),
+        CheckConstraint(
+            "earliest_retained_sequence >= 1",
+            name="ck_sync_user_state_retained_positive",
+        ),
+        CheckConstraint(
+            "earliest_retained_sequence <= next_server_sequence",
+            name="ck_sync_user_state_retained_before_next",
         ),
     )
 

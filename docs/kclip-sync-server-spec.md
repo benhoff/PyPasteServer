@@ -1,6 +1,6 @@
 # kclip Sync Server Specification
 
-- Status: Draft 0.1
+- Status: Draft 0.2
 - Audience: PyPasteServer and kclip maintainers
 - Companion specification: `dev_clipboard/docs/pypasteserver-sync-client-spec.md`
 
@@ -16,7 +16,7 @@ The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are normative.
 
 ## 2. Goals
 
-- Support an offline-first Rust client with durable upload and replay.
+- Support an offline-first Rust client with durable upload and bounded replay.
 - Preserve end-to-end encryption between a user's devices.
 - Give each accepted event a stable, per-user server sequence.
 - Make retries idempotent.
@@ -33,6 +33,8 @@ The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are normative.
 - Exactly-once network delivery. The protocol provides at-least-once delivery
   with idempotent processing.
 - Supporting the experimental `/dev/kclip` kernel interface.
+- Guaranteeing complete state recovery after a device falls behind the retained
+  event window.
 
 ## 4. System boundary
 
@@ -182,13 +184,20 @@ After validating the hello, the server responds:
   "protocol_version": 1,
   "connection_id": "5c3f...",
   "latest_sequence": 57,
-  "replay_from": 43
+  "earliest_sequence": 50,
+  "replay_from": 50,
+  "history_truncated": true
 }
 ```
 
-The server then sends all events with `server_sequence > resume_after` in
-strict ascending order. Events committed while replay is running MUST be sent
-after the replayed prefix without gaps or reordering on that connection.
+`earliest_sequence` is the first event still available. When the buffer is
+empty it is one greater than `latest_sequence`. `history_truncated` is true
+when `resume_after + 1 < earliest_sequence`; the client MUST then durably skip
+through `earliest_sequence - 1` and accept the intentionally lossy replay.
+
+The server sends retained events beginning at `replay_from` in strict ascending
+order. Events committed while replay is running MUST follow the replayed
+suffix without gaps or reordering on that connection.
 
 ### 6.3 Push
 
@@ -221,9 +230,9 @@ Acceptance MUST be transactional:
 4. Send an acknowledgement.
 5. Publish a Redis notification for newly inserted events.
 
-If the connection fails after commit but before acknowledgement, retrying the
-same `message_id` MUST return the original sequence and MUST NOT create a new
-event.
+While an event remains in the rolling buffer, retrying the same `message_id`
+MUST return the original sequence and MUST NOT create a new event. Deduplication
+is not guaranteed after the original event expires from the buffer.
 
 ### 6.4 Push acknowledgement
 
@@ -263,6 +272,23 @@ self-echoes at the server.
 
 `sender_device_id` is informational and MUST be populated from the authenticated
 connection, not from the push body.
+
+If retention advances beyond an already-connected client's next sequence, the
+server sends this control message before resuming delivery:
+
+```json
+{
+  "type": "history_truncated",
+  "protocol_version": 1,
+  "earliest_sequence": 50,
+  "latest_sequence": 57,
+  "replay_from": 50
+}
+```
+
+The client MUST durably skip through `earliest_sequence - 1`, then accept event
+delivery from `replay_from`. Expiration is informational and does not close the
+connection.
 
 ### 6.6 Processing checkpoint
 
@@ -351,6 +377,7 @@ The logical schema is:
 
 - `user_id`, primary and foreign key
 - `next_server_sequence`, non-null integer starting at 1
+- `earliest_retained_sequence`, non-null integer starting at 1
 - `created_at`
 - `updated_at`
 
@@ -393,17 +420,28 @@ creating duplicates or gaps caused by rolled-back transactions.
 
 ## 9. Replay, retention, and quotas
 
-The first production implementation MUST retain every accepted sync event. It
-MUST NOT silently prune events because protocol version 1 has no encrypted
-snapshot or compaction mechanism from which a device can recover.
+The relay is a lossy rolling event buffer. The default policy independently
+limits each account to:
 
-The server MAY enforce account storage quotas. When a quota is exhausted, it
-MUST reject new pushes explicitly; it MUST NOT delete older events behind an
-offline client's cursor.
+- seven days since server acceptance;
+- 1,000 retained events; and
+- 128 MiB across stored nonce, ciphertext, and tag bytes.
 
-A later protocol may add snapshots and bounded retention. Until that protocol
-is deployed to all supported clients, `replay_unavailable` is a terminal state
-requiring explicit operator or user recovery, not an invitation to skip ahead.
+After accepting an event and during periodic cleanup, the server MUST delete
+the oldest contiguous prefix until every enabled limit is satisfied. It MUST
+advance `earliest_retained_sequence` in the same transaction and MUST never
+reuse or renumber deleted sequences. A single newest event MAY exceed the byte
+limit so an accepted push is not immediately deleted.
+
+Device cursors do not block retention. Missing revisions, slot values, and
+tombstones on a long-offline or new device are accepted consequences. The
+server cannot select a latest event per slot because slot identity is encrypted.
+No snapshot or compaction baseline is retained.
+
+The server MAY additionally enforce hard account quotas. A hard quota rejects
+new pushes explicitly and is distinct from automatic rolling retention. Setting
+all rolling limits to zero disables automatic deletion for a staged client
+migration.
 
 ## 10. Fanout and Redis
 
@@ -440,6 +478,7 @@ The server should add explicit settings for:
 - maximum replay batch size;
 - per-connection queue bytes;
 - per-account event/storage quota;
+- rolling retention age, event count, stored bytes, and cleanup interval;
 - rate limits.
 
 Secure production defaults MUST require TLS at the reverse proxy, a non-default
@@ -453,6 +492,8 @@ Metrics SHOULD include:
 - accepted and deduplicated pushes;
 - push and replay bytes;
 - replay lag by event count;
+- events and bytes removed by retention;
+- events skipped during truncated replay;
 - authentication failures;
 - event-too-large, quota, and rate-limit errors;
 - Redis notification failures;
@@ -487,6 +528,9 @@ Logs and metrics MUST NOT include plaintext or cryptographic secrets.
 - Events committed during replay follow the replay prefix in order.
 - Duplicate notifications do not duplicate events on a connection.
 - A checkpoint never moves backwards.
+- Reconnect below the retained floor reports truncation and replays from the
+  earliest available event.
+- Retention deletes only a contiguous prefix and never reuses a sequence.
 
 ### 14.4 Security tests
 
@@ -515,8 +559,10 @@ The server portion is complete when:
 
 1. Two independently running `kclipd` instances for one account exchange an
    encrypted revision without the server learning its slot or content.
-2. An accepted event survives API, Redis, and client restarts.
+2. An accepted event survives API, Redis, and client restarts while it remains
+   inside the rolling retention window.
 3. Retrying a push cannot create a duplicate event.
-4. An offline client resumes without missing committed events.
+4. An offline client within the retained window resumes without missing events;
+   an older client is explicitly advanced to the retained floor.
 5. Events remain strictly isolated by authenticated user.
 6. No Python desktop process is required for Rust-to-server synchronization.

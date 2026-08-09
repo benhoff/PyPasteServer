@@ -16,6 +16,7 @@ from server_app.sync_protocol import (
     decode_json_frame,
     encode_base64url,
     event_message,
+    history_truncated_message,
     parse_client_message,
     push_ack_message,
     ready_message,
@@ -101,6 +102,30 @@ def test_shared_wire_fixture_matches_protocol_helpers() -> None:
     assert parse_client_message(
         fixture["checkpoint"], max_event_bytes=1024
     ) == CheckpointMessage(server_sequence=58)
+
+
+def test_ready_reports_a_truncated_replay_window() -> None:
+    assert ready_message(
+        connection_id="connection-contract",
+        latest_sequence=57,
+        earliest_sequence=50,
+        resume_after=42,
+    ) == {
+        "type": "ready",
+        "protocol_version": 1,
+        "connection_id": "connection-contract",
+        "latest_sequence": 57,
+        "earliest_sequence": 50,
+        "replay_from": 50,
+        "history_truncated": True,
+    }
+    assert history_truncated_message(earliest_sequence=50, latest_sequence=57) == {
+        "type": "history_truncated",
+        "protocol_version": 1,
+        "earliest_sequence": 50,
+        "latest_sequence": 57,
+        "replay_from": 50,
+    }
 
 
 @pytest.mark.parametrize(

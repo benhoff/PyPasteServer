@@ -277,14 +277,37 @@ def parse_client_message(
 
 
 def ready_message(
-    *, connection_id: str, latest_sequence: int, resume_after: int
+    *,
+    connection_id: str,
+    latest_sequence: int,
+    resume_after: int,
+    earliest_sequence: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    message: dict[str, Any] = {
         "type": "ready",
         "protocol_version": PROTOCOL_VERSION,
         "connection_id": connection_id,
         "latest_sequence": latest_sequence,
         "replay_from": resume_after + 1,
+    }
+    if earliest_sequence is not None:
+        message["earliest_sequence"] = earliest_sequence
+        message["replay_from"] = max(resume_after + 1, earliest_sequence)
+        message["history_truncated"] = resume_after + 1 < earliest_sequence
+    return message
+
+
+def history_truncated_message(
+    *, earliest_sequence: int, latest_sequence: int
+) -> dict[str, Any]:
+    """Tell an already-connected client that its next sequence expired."""
+
+    return {
+        "type": "history_truncated",
+        "protocol_version": PROTOCOL_VERSION,
+        "earliest_sequence": earliest_sequence,
+        "latest_sequence": latest_sequence,
+        "replay_from": earliest_sequence,
     }
 
 
@@ -340,6 +363,7 @@ __all__ = [
     "decode_json_frame",
     "encode_base64url",
     "event_message",
+    "history_truncated_message",
     "parse_client_message",
     "push_ack_message",
     "ready_message",

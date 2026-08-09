@@ -50,4 +50,5 @@ def test_migrations_remove_legacy_clipboard_and_seed_existing_users(tmp_path) ->
             select(SyncUserState).where(SyncUserState.user_id == 7)
         ).one()
         assert state.next_server_sequence == 1
+        assert state.earliest_retained_sequence == 1
     engine.dispose()

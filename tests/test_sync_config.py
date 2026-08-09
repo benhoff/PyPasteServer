@@ -42,3 +42,11 @@ def test_frame_must_accommodate_base64url_event(monkeypatch) -> None:
     monkeypatch.setattr(config, "SYNC_MAX_EVENT_BYTES", 1024)
     with pytest.raises(RuntimeError, match="base64url"):
         config.validate_settings()
+
+
+def test_retention_cleanup_interval_must_be_positive(monkeypatch) -> None:
+    monkeypatch.setattr(config, "APP_ENV", "development")
+    monkeypatch.setattr(config, "SYNC_ENABLED", True)
+    monkeypatch.setattr(config, "SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS", 0)
+    with pytest.raises(RuntimeError, match="RETENTION_CLEANUP"):
+        config.validate_settings()

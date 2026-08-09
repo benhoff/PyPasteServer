@@ -18,7 +18,7 @@ from .config import (
     SYNC_REPLAY_BATCH_SIZE,
 )
 from .redis_client import redis_client
-from .sync_protocol import SyncProtocolError, event_message
+from .sync_protocol import SyncProtocolError, event_message, history_truncated_message
 from .sync_service import StoredEvent, SyncStore, sync_store
 
 logger = logging.getLogger(__name__)
@@ -155,13 +155,14 @@ class SyncConnection:
     async def deliver_through_locked(self, target_sequence: int) -> None:
         """Replay through a target while the caller holds ``delivery_lock``."""
 
-        if target_sequence <= self.last_delivered_sequence or self._closed:
+        if self._closed:
             return
         if self.replay_batch_size < 1:
             raise SyncProtocolError(
                 "internal_error", "invalid replay batch configuration", retryable=True
             )
 
+        await self._advance_to_retention_floor_locked()
         while self.last_delivered_sequence < target_sequence:
             batch = await run_sync(
                 self.store.events_after,
@@ -171,6 +172,8 @@ class SyncConnection:
                 limit=self.replay_batch_size,
             )
             if not batch:
+                if await self._advance_to_retention_floor_locked():
+                    continue
                 raise SyncProtocolError(
                     "replay_unavailable",
                     "the requested event prefix is unavailable",
@@ -180,14 +183,36 @@ class SyncConnection:
             for event in batch:
                 expected = self.last_delivered_sequence + 1
                 if event.server_sequence != expected:
-                    raise SyncProtocolError(
-                        "replay_unavailable",
-                        "the durable event log contains a sequence gap",
-                        close_code=1011,
-                    )
+                    if await self._advance_to_retention_floor_locked():
+                        expected = self.last_delivered_sequence + 1
+                    if event.server_sequence < expected:
+                        continue
+                    if event.server_sequence != expected:
+                        raise SyncProtocolError(
+                            "replay_unavailable",
+                            "the durable event log contains a sequence gap",
+                            close_code=1011,
+                        )
                 await self.enqueue(_wire_event(event))
                 self.last_delivered_sequence = event.server_sequence
                 sync_metrics.increment("replay_bytes", _event_size(event))
+
+    async def _advance_to_retention_floor_locked(self) -> bool:
+        """Advance over an intentionally pruned prefix and notify the client."""
+
+        window = await run_sync(self.store.replay_window, self.user_id)
+        if self.last_delivered_sequence + 1 >= window.earliest_sequence:
+            return False
+        await self.enqueue(
+            history_truncated_message(
+                earliest_sequence=window.earliest_sequence,
+                latest_sequence=window.latest_sequence,
+            )
+        )
+        skipped = window.earliest_sequence - self.last_delivered_sequence - 1
+        self.last_delivered_sequence = window.earliest_sequence - 1
+        sync_metrics.increment("truncated_replay_events", skipped)
+        return True
 
     async def close(
         self,

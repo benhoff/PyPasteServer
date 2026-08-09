@@ -71,6 +71,20 @@ SYNC_REDIS_PUBLISH_TIMEOUT_SECONDS = _get_nonnegative_int(
     "SYNC_REDIS_PUBLISH_TIMEOUT_SECONDS", 2
 )
 
+# The relay is a lossy synchronization buffer rather than permanent clipboard
+# history.  Each non-zero limit is enforced independently and the oldest
+# account events are removed until every enabled limit is satisfied.
+SYNC_RETENTION_MAX_AGE_SECONDS = _get_nonnegative_int(
+    "SYNC_RETENTION_MAX_AGE_SECONDS", 7 * 24 * 60 * 60
+)
+SYNC_RETENTION_MAX_EVENTS = _get_nonnegative_int("SYNC_RETENTION_MAX_EVENTS", 1000)
+SYNC_RETENTION_MAX_STORAGE_BYTES = _get_nonnegative_int(
+    "SYNC_RETENTION_MAX_STORAGE_BYTES", 128 * 1024 * 1024
+)
+SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS = _get_nonnegative_int(
+    "SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS", 60 * 60
+)
+
 
 def validate_settings() -> None:
     if SYNC_ENABLED:
@@ -83,6 +97,9 @@ def validate_settings() -> None:
             "SYNC_HELLO_TIMEOUT_SECONDS": SYNC_HELLO_TIMEOUT_SECONDS,
             "SYNC_DATABASE_WORKERS": SYNC_DATABASE_WORKERS,
             "SYNC_REDIS_PUBLISH_TIMEOUT_SECONDS": SYNC_REDIS_PUBLISH_TIMEOUT_SECONDS,
+            "SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS": (
+                SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS
+            ),
         }
         for name, value in positive_settings.items():
             if value < 1:
@@ -119,25 +136,29 @@ __all__ = [
     "APP_ENV",
     "DATABASE_URL",
     "DEFAULT_JWT_SECRET",
-    "JWT_SECRET",
     "JWT_ALGORITHM",
+    "JWT_SECRET",
     "REDIS_URL",
-    "SYNC_ENABLED",
-    "SYNC_ALLOW_QUERY_TOKEN",
-    "SYNC_ALLOW_LEGACY_BEARER",
-    "SYNC_REQUIRE_TLS",
     "RUN_DATABASE_MIGRATIONS_ON_STARTUP",
-    "SYNC_MAX_FRAME_BYTES",
-    "SYNC_MAX_EVENT_BYTES",
-    "SYNC_REPLAY_BATCH_SIZE",
-    "SYNC_MAX_QUEUE_BYTES",
-    "SYNC_MAX_INVALID_MESSAGES",
-    "SYNC_HELLO_TIMEOUT_SECONDS",
-    "SYNC_DATABASE_WORKERS",
     "SYNC_ACCOUNT_MAX_EVENTS",
     "SYNC_ACCOUNT_MAX_STORAGE_BYTES",
+    "SYNC_ALLOW_LEGACY_BEARER",
+    "SYNC_ALLOW_QUERY_TOKEN",
+    "SYNC_DATABASE_WORKERS",
+    "SYNC_ENABLED",
+    "SYNC_HELLO_TIMEOUT_SECONDS",
+    "SYNC_MAX_EVENT_BYTES",
+    "SYNC_MAX_FRAME_BYTES",
+    "SYNC_MAX_INVALID_MESSAGES",
+    "SYNC_MAX_QUEUE_BYTES",
     "SYNC_RATE_LIMIT_EVENTS",
     "SYNC_RATE_LIMIT_WINDOW_SECONDS",
     "SYNC_REDIS_PUBLISH_TIMEOUT_SECONDS",
+    "SYNC_REPLAY_BATCH_SIZE",
+    "SYNC_REQUIRE_TLS",
+    "SYNC_RETENTION_CLEANUP_INTERVAL_SECONDS",
+    "SYNC_RETENTION_MAX_AGE_SECONDS",
+    "SYNC_RETENTION_MAX_EVENTS",
+    "SYNC_RETENTION_MAX_STORAGE_BYTES",
     "validate_settings",
 ]

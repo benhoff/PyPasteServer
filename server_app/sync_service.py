@@ -5,9 +5,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,30 @@ class SyncLimits:
     max_account_storage_bytes: int = 0
     rate_limit_events: int = 0
     rate_limit_window_seconds: int = 60
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionPolicy:
+    max_age_seconds: int = 0
+    max_events: int = 0
+    max_storage_bytes: int = 0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.max_age_seconds or self.max_events or self.max_storage_bytes)
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayWindow:
+    earliest_sequence: int
+    latest_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class PruneResult:
+    deleted_events: int
+    deleted_bytes: int
+    earliest_sequence: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,14 +95,22 @@ class SyncStore:
         factory = self._session_factory or database.SessionLocal
         return factory()
 
-    def latest_sequence(self, user_id: int) -> int:
+    def replay_window(self, user_id: int) -> ReplayWindow:
         with self._session() as session:
-            latest = session.execute(
-                select(func.max(SyncEvent.server_sequence)).where(
-                    SyncEvent.user_id == user_id
+            state = session.get(SyncUserState, user_id)
+            if state is None:
+                raise SyncProtocolError(
+                    "server_unavailable",
+                    "sync account state is unavailable",
+                    retryable=True,
                 )
-            ).scalar_one()
-            return int(latest or 0)
+            return ReplayWindow(
+                earliest_sequence=int(state.earliest_retained_sequence),
+                latest_sequence=int(state.next_server_sequence) - 1,
+            )
+
+    def latest_sequence(self, user_id: int) -> int:
+        return self.replay_window(user_id).latest_sequence
 
     def events_after(
         self, user_id: int, after: int, *, through: int, limit: int
@@ -143,12 +175,14 @@ class SyncStore:
                     "permission_denied", "device has been revoked", close_code=1008
                 )
 
-            latest = session.execute(
-                select(func.max(SyncEvent.server_sequence)).where(
-                    SyncEvent.user_id == user_id
+            state = session.get(SyncUserState, user_id)
+            if state is None:
+                raise SyncProtocolError(
+                    "server_unavailable",
+                    "sync account state is unavailable",
+                    retryable=True,
                 )
-            ).scalar_one()
-            latest_sequence = int(latest or 0)
+            latest_sequence = int(state.next_server_sequence) - 1
             if server_sequence > latest_sequence:
                 raise SyncProtocolError(
                     "invalid_message", "checkpoint exceeds the latest server sequence"
@@ -189,6 +223,7 @@ class SyncStore:
         device_id: str,
         push: PushMessage,
         limits: SyncLimits,
+        retention: RetentionPolicy | None = None,
     ) -> AcceptedEvent:
         for attempt in range(5):
             try:
@@ -197,6 +232,7 @@ class SyncStore:
                     device_id=device_id,
                     push=push,
                     limits=limits,
+                    retention=retention,
                 )
             except OperationalError:
                 if attempt == 4:
@@ -215,6 +251,7 @@ class SyncStore:
         device_id: str,
         push: PushMessage,
         limits: SyncLimits,
+        retention: RetentionPolicy | None,
     ) -> AcceptedEvent:
         with self._session() as session:
             self._require_device(session, user_id, device_id)
@@ -254,6 +291,10 @@ class SyncStore:
                         "permission_denied", "device is not permitted", close_code=1008
                     )
                 cursor.last_seen_at = utc_now()
+
+                session.flush()
+                if retention is not None and retention.enabled:
+                    self._prune_account_in_session(session, user_id, retention)
 
                 session.commit()
                 return AcceptedEvent(_stored_event(event), duplicate=False)
@@ -365,11 +406,131 @@ class SyncStore:
                     "rate_limited", "account event rate limit exceeded", retryable=True
                 )
 
+    def prune_account(self, user_id: int, policy: RetentionPolicy) -> PruneResult:
+        if not policy.enabled:
+            window = self.replay_window(user_id)
+            return PruneResult(0, 0, window.earliest_sequence)
+        for attempt in range(5):
+            try:
+                with self._session() as session:
+                    result = self._prune_account_in_session(session, user_id, policy)
+                    session.commit()
+                    return result
+            except OperationalError:
+                if attempt == 4:
+                    break
+                time.sleep(0.01 * (attempt + 1))
+        raise SyncProtocolError(
+            "server_unavailable",
+            "event retention is temporarily unavailable",
+            retryable=True,
+        )
+
+    def prune_all(self, policy: RetentionPolicy) -> PruneResult:
+        if not policy.enabled:
+            return PruneResult(0, 0, 1)
+        with self._session() as session:
+            user_ids = list(session.scalars(select(SyncUserState.user_id)))
+
+        deleted_events = 0
+        deleted_bytes = 0
+        earliest_sequence = 1
+        for user_id in user_ids:
+            result = self.prune_account(int(user_id), policy)
+            deleted_events += result.deleted_events
+            deleted_bytes += result.deleted_bytes
+            earliest_sequence = result.earliest_sequence
+        return PruneResult(deleted_events, deleted_bytes, earliest_sequence)
+
+    @staticmethod
+    def _prune_account_in_session(
+        session: Session, user_id: int, policy: RetentionPolicy
+    ) -> PruneResult:
+        state = session.execute(
+            select(SyncUserState)
+            .where(SyncUserState.user_id == user_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if state is None:
+            raise SyncProtocolError(
+                "server_unavailable",
+                "sync account state is unavailable",
+                retryable=True,
+            )
+
+        rows = list(
+            session.execute(
+                select(
+                    SyncEvent.server_sequence,
+                    SyncEvent.accepted_at,
+                    (
+                        func.length(SyncEvent.nonce)
+                        + func.length(SyncEvent.ciphertext)
+                        + func.length(SyncEvent.tag)
+                    ).label("stored_bytes"),
+                )
+                .where(SyncEvent.user_id == user_id)
+                .order_by(SyncEvent.server_sequence.asc())
+            )
+        )
+        if not rows:
+            state.earliest_retained_sequence = int(state.next_server_sequence)
+            return PruneResult(0, 0, int(state.earliest_retained_sequence))
+
+        keep_from = 0
+        if policy.max_age_seconds:
+            cutoff = utc_now() - timedelta(seconds=policy.max_age_seconds)
+            while keep_from < len(rows):
+                accepted_at = rows[keep_from].accepted_at
+                if accepted_at.tzinfo is None:
+                    accepted_at = accepted_at.replace(tzinfo=UTC)
+                if accepted_at >= cutoff:
+                    break
+                keep_from += 1
+
+        if policy.max_events and len(rows) - keep_from > policy.max_events:
+            keep_from = len(rows) - policy.max_events
+
+        if policy.max_storage_bytes and keep_from < len(rows):
+            retained_bytes = sum(int(row.stored_bytes or 0) for row in rows[keep_from:])
+            # Keep at least the newest event even when an administrator sets a
+            # byte limit below the maximum accepted event size.
+            while (
+                retained_bytes > policy.max_storage_bytes and len(rows) - keep_from > 1
+            ):
+                retained_bytes -= int(rows[keep_from].stored_bytes or 0)
+                keep_from += 1
+
+        if keep_from == 0:
+            earliest = int(rows[0].server_sequence)
+            state.earliest_retained_sequence = earliest
+            return PruneResult(0, 0, earliest)
+
+        removed = rows[:keep_from]
+        cutoff_sequence = int(removed[-1].server_sequence)
+        deleted_events = session.execute(
+            delete(SyncEvent).where(
+                SyncEvent.user_id == user_id,
+                SyncEvent.server_sequence <= cutoff_sequence,
+            )
+        ).rowcount
+        deleted_bytes = sum(int(row.stored_bytes or 0) for row in removed)
+        earliest = (
+            int(rows[keep_from].server_sequence)
+            if keep_from < len(rows)
+            else int(state.next_server_sequence)
+        )
+        state.earliest_retained_sequence = earliest
+        return PruneResult(int(deleted_events or 0), deleted_bytes, earliest)
+
 
 sync_store = SyncStore()
 
 __all__ = [
     "AcceptedEvent",
+    "PruneResult",
+    "ReplayWindow",
+    "RetentionPolicy",
     "StoredEvent",
     "SyncLimits",
     "SyncStore",

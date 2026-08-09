@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -10,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from server_app.db import Base
 from server_app.models import SyncDeviceCursor, SyncEvent, SyncUserState, User, utc_now
 from server_app.sync_protocol import PushMessage, SyncProtocolError
-from server_app.sync_service import SyncLimits, SyncStore
+from server_app.sync_service import RetentionPolicy, SyncLimits, SyncStore
 
 
 @pytest.fixture
@@ -194,6 +195,56 @@ def test_storage_quota_and_rate_limit_are_durable(store_context) -> None:
     assert restarted.events_after(user_id, 0, through=2, limit=10)[0].message_id == (
         first.event.message_id
     )
+
+
+def test_retention_prunes_a_contiguous_prefix_by_count_and_bytes(store_context) -> None:
+    store, factory, user_id = store_context
+    for index in range(1, 6):
+        store.accept_event(
+            user_id=user_id,
+            device_id="device-a",
+            push=_push(byte=index),
+            limits=SyncLimits(),
+            retention=RetentionPolicy(max_events=3, max_storage_bytes=82),
+        )
+
+    # Each test event occupies 41 opaque bytes, so the byte limit is stricter
+    # than the event-count limit and retains sequences 4 and 5.
+    assert [
+        event.server_sequence
+        for event in store.events_after(user_id, 0, through=5, limit=10)
+    ] == [4, 5]
+    window = store.replay_window(user_id)
+    assert window.earliest_sequence == 4
+    assert window.latest_sequence == 5
+    with factory() as session:
+        state = session.get(SyncUserState, user_id)
+        assert state.next_server_sequence == 6
+        assert state.earliest_retained_sequence == 4
+
+
+def test_age_retention_can_expire_the_entire_buffer(store_context) -> None:
+    store, factory, user_id = store_context
+    for index in range(1, 4):
+        store.accept_event(
+            user_id=user_id,
+            device_id="device-a",
+            push=_push(byte=index),
+            limits=SyncLimits(),
+        )
+    with factory() as session:
+        for event in session.scalars(select(SyncEvent)):
+            event.accepted_at = utc_now() - timedelta(days=8)
+        session.commit()
+
+    result = store.prune_account(
+        user_id, RetentionPolicy(max_age_seconds=7 * 24 * 60 * 60)
+    )
+    assert result.deleted_events == 3
+    assert store.events_after(user_id, 0, through=3, limit=10) == []
+    window = store.replay_window(user_id)
+    assert window.earliest_sequence == 4
+    assert window.latest_sequence == 3
 
 
 def test_revoked_device_cannot_push_or_checkpoint(store_context) -> None:
