@@ -25,11 +25,19 @@ For a persistent local installation, run:
 The installer checks Docker, generates a private `.env` containing a random
 JWT secret, stores the SQLite database under the normal XDG data directory,
 builds the image, and starts the server and Redis in the background. It binds
-to `127.0.0.1:8001` by default. To accept clients from the local network, use:
+to `127.0.0.1:8001` by default. To accept clients from the local network,
+provide both the bind address and the URL those clients will actually use:
 
 ```bash
-./install.sh --listen 0.0.0.0
+./install.sh \
+  --listen 0.0.0.0 \
+  --relay-url ws://clipboard.home:8001/sync/v1
 ```
+
+The listen address controls where Docker publishes the port. The relay URL is
+placed in device setup codes, so it must contain a hostname or address reachable
+from client devices. Use a `wss://` URL when TLS is terminated by a reverse
+proxy.
 
 Paired clients encrypt and authenticate every application frame over this
 `ws://` endpoint with Noise. Network observers can still see endpoints, timing,
@@ -43,21 +51,28 @@ Run the small administration UI on the server host:
 ./admin.sh
 ```
 
-It lists and creates accounts, creates and lists device pairings, reports
-server status, and confirms revocation. Commands can also be scripted:
+The default action is a guided “connect a new device” workflow. It creates an
+account inline when necessary, lets the operator select existing accounts by
+number, asks for a recognizable device name, and prints one versioned client
+setup code. Account and device management remain available from the same menu.
+
+Commands can also be scripted:
 
 ```bash
-./admin.sh accounts
-./admin.sh account create alice alice@example.test
-./admin.sh pair create alice laptop
-./admin.sh pair list alice
-./admin.sh pair revoke PAIRING_ID
+./admin.sh device add alice laptop
+./admin.sh device list alice
+./admin.sh device revoke PAIRING_ID
+./admin.sh diagnose
+./admin.sh account list
+./admin.sh account create alice
 ```
 
-The pairing command prints a pairing code once. Transfer it to the client over
-an offline channel, run `kclip auth pair`, and paste it into the hidden prompt.
-The underlying `python -m server_app.admin` interface remains available inside
-the app container for automation.
+`device add` prints a `kclip-setup-v1` code containing the relay URL and one
+device credential. Transfer it to that device over a private channel, run
+`kclip sync setup`, and paste it into the hidden prompt. The code does not
+contain the separate account synchronization key used for end-to-end clipboard
+encryption. The underlying `python -m server_app.admin` resource commands remain
+available inside the app container for lower-level automation.
 
 To run the development stack directly instead:
 

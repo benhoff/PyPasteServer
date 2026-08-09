@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import secrets
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .db import SessionLocal
 from .models import PairedDevice, SyncUserState, User
-from .pairing import create_pairing
+from .pairing import DeviceSetupCode, create_pairing, validate_relay_url
 from .security import get_password_hash
 
 
@@ -20,27 +21,28 @@ def _parser() -> argparse.ArgumentParser:
         prog="pypasteserver-admin",
         description="Manage local accounts and Noise pairing credentials.",
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    resources = parser.add_subparsers(dest="resource", required=True)
 
-    account = commands.add_parser(
-        "create-account", description="Create a passwordless local account."
+    account = resources.add_parser("account", description="Manage local accounts.")
+    account_commands = account.add_subparsers(dest="action", required=True)
+    create_account = account_commands.add_parser(
+        "create", description="Create a passwordless local account."
     )
-    account.add_argument("--username", required=True)
-    account.add_argument("--email", required=True)
+    create_account.add_argument("--username", required=True)
+    account_commands.add_parser("list")
 
-    commands.add_parser("list-accounts")
-
-    create = commands.add_parser(
-        "create-pairing", description="Issue one pairing code for a device."
+    device = resources.add_parser("device", description="Manage connected devices.")
+    device_commands = device.add_subparsers(dest="action", required=True)
+    add_device = device_commands.add_parser(
+        "add", description="Create a versioned client setup code for a device."
     )
-    create.add_argument("--username", required=True)
-    create.add_argument("--device-name", required=True)
-
-    listing = commands.add_parser("list-pairings")
-    listing.add_argument("--username", required=True)
-
-    revoke = commands.add_parser("revoke-pairing")
-    revoke.add_argument("--pairing-id", required=True)
+    add_device.add_argument("--username", required=True)
+    add_device.add_argument("--device-name", required=True)
+    add_device.add_argument("--relay-url", required=True)
+    list_devices = device_commands.add_parser("list")
+    list_devices.add_argument("--username", required=True)
+    revoke_device = device_commands.add_parser("revoke")
+    revoke_device.add_argument("--pairing-id", required=True)
     return parser
 
 
@@ -53,11 +55,9 @@ def _user(session, username: str) -> User:
 
 def _create_account(args: argparse.Namespace) -> None:
     username = args.username.strip()
-    email = args.email.strip()
     if not username or len(username) > 150:
         raise ValueError("username must contain 1 to 150 characters")
-    if not email or len(email) > 255:
-        raise ValueError("email must contain 1 to 255 characters")
+    email = f"local-{uuid4()}@pypasteserver.invalid"
     # The random value is discarded. This account can only authenticate with a
     # locally issued pairing credential unless an administrator resets it using
     # some future password-management flow.
@@ -76,7 +76,7 @@ def _create_account(args: argparse.Namespace) -> None:
             session.commit()
         except IntegrityError as exc:
             session.rollback()
-            raise ValueError("username or email already exists") from exc
+            raise ValueError("username already exists") from exc
     print(f"Created account {username}")
 
 
@@ -95,13 +95,14 @@ def _list_accounts(args: argparse.Namespace) -> None:
                 active + int(device.revoked_at is None),
                 total + 1,
             )
-        print("USERNAME\tEMAIL\tACTIVE-PAIRINGS\tTOTAL-PAIRINGS")
+        print("USERNAME\tACTIVE-DEVICES\tTOTAL-DEVICES")
         for user in users:
             active, total = totals.get(user.id, (0, 0))
-            print(f"{user.username}\t{user.email}\t{active}\t{total}")
+            print(f"{user.username}\t{active}\t{total}")
 
 
-def _create_pairing(args: argparse.Namespace) -> None:
+def _add_device(args: argparse.Namespace) -> None:
+    relay_url = validate_relay_url(args.relay_url)
     with SessionLocal() as session:
         user = _user(session, args.username)
         try:
@@ -111,13 +112,20 @@ def _create_pairing(args: argparse.Namespace) -> None:
         except IntegrityError as exc:
             session.rollback()
             raise ValueError("could not create pairing credential") from exc
+    setup = DeviceSetupCode(
+        relay_url=relay_url,
+        username=user.username,
+        device_name=device.device_name,
+        pairing=pairing,
+    )
+    print(f"Created device {device.device_name} for account {user.username}")
     print(f"Pairing ID: {device.pairing_id}")
     print(f"Device: {device.device_name}")
-    print("Pairing code (shown once):")
-    print(pairing.encode())
+    print("Client setup code (contains the device credential; shown once):")
+    print(setup.encode())
 
 
-def _list_pairings(args: argparse.Namespace) -> None:
+def _list_devices(args: argparse.Namespace) -> None:
     with SessionLocal() as session:
         user = _user(session, args.username)
         devices = session.scalars(
@@ -126,7 +134,7 @@ def _list_pairings(args: argparse.Namespace) -> None:
             .order_by(PairedDevice.created_at, PairedDevice.id)
         ).all()
         if not devices:
-            print("No pairings")
+            print("No devices")
             return
         for device in devices:
             state = "revoked" if device.revoked_at is not None else "active"
@@ -139,29 +147,29 @@ def _list_pairings(args: argparse.Namespace) -> None:
             )
 
 
-def _revoke_pairing(args: argparse.Namespace) -> None:
+def _revoke_device(args: argparse.Namespace) -> None:
     with SessionLocal() as session:
         device = session.scalar(
             select(PairedDevice).where(PairedDevice.pairing_id == args.pairing_id)
         )
         if device is None:
-            raise ValueError("pairing does not exist")
+            raise ValueError("device does not exist")
         if device.revoked_at is None:
             device.revoked_at = datetime.now(UTC)
             session.commit()
-    print(f"Revoked pairing {args.pairing_id}")
+    print(f"Revoked device {args.pairing_id}")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         {
-            "create-account": _create_account,
-            "list-accounts": _list_accounts,
-            "create-pairing": _create_pairing,
-            "list-pairings": _list_pairings,
-            "revoke-pairing": _revoke_pairing,
-        }[args.command](args)
+            ("account", "create"): _create_account,
+            ("account", "list"): _list_accounts,
+            ("device", "add"): _add_device,
+            ("device", "list"): _list_devices,
+            ("device", "revoke"): _revoke_device,
+        }[(args.resource, args.action)](args)
     except ValueError as exc:
         raise SystemExit(f"error: {exc}") from exc
     return 0

@@ -62,6 +62,7 @@ def test_installer_generates_private_config_and_preserves_secret(tmp_path) -> No
     initial = _settings(environment_file)
     assert initial["PYP_SERVER_BIND_ADDRESS"] == "127.0.0.1"
     assert initial["PYP_SERVER_PORT"] == "8123"
+    assert initial["PYP_SERVER_PUBLIC_RELAY_URL"] == "ws://127.0.0.1:8123/sync/v1"
     assert initial["PYP_SERVER_DATA_DIRECTORY"] == str(data_directory)
     assert len(initial["JWT_SECRET"]) == 64
     assert initial["SYNC_ALLOW_LEGACY_BEARER"] == "0"
@@ -80,7 +81,32 @@ def test_installer_generates_private_config_and_preserves_secret(tmp_path) -> No
 
     updated = _settings(environment_file)
     assert updated["PYP_SERVER_PORT"] == "9000"
+    assert updated["PYP_SERVER_PUBLIC_RELAY_URL"] == "ws://127.0.0.1:9000/sync/v1"
     assert updated["JWT_SECRET"] == initial["JWT_SECRET"]
+
+
+def test_installer_records_explicit_client_facing_relay(tmp_path) -> None:
+    installer = tmp_path / "install.sh"
+    shutil.copy2(PROJECT_ROOT / "install.sh", installer)
+    installer.chmod(0o755)
+
+    result = _run_installer(
+        tmp_path,
+        "--listen",
+        "0.0.0.0",
+        "--relay-url",
+        "wss://clipboard.example.test/sync/v1",
+        "--no-build",
+        "--no-start",
+    )
+
+    assert result.returncode == 0, result.stderr
+    settings = _settings(tmp_path / ".env")
+    assert settings["PYP_SERVER_PUBLIC_RELAY_URL"] == (
+        "wss://clipboard.example.test/sync/v1"
+    )
+    assert "Relay: wss://clipboard.example.test/sync/v1" in result.stdout
+    assert "./admin.sh device add" in result.stdout
 
 
 def test_installer_requires_reconfigure_for_existing_config_changes(tmp_path) -> None:

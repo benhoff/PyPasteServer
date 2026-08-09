@@ -13,6 +13,7 @@ CONFIG_OVERRIDDEN=0
 SERVER_BIND_OVERRIDE=""
 SERVER_PORT_OVERRIDE=""
 DATA_DIRECTORY_OVERRIDE=""
+PUBLIC_RELAY_OVERRIDE=""
 
 info() {
     printf '==> %s\n' "$*"
@@ -32,6 +33,7 @@ Configure, build, and start PyPasteServer with Docker Compose.
 Options:
   --listen ADDRESS  Host address to publish (default: 127.0.0.1)
   --port PORT       Host port to publish (default: 8001)
+  --relay-url URL   Client-facing ws:// or wss:// URL ending in /sync/v1
   --data-dir PATH   Persistent database directory
                     (default: $XDG_DATA_HOME/pypasteserver or
                     $HOME/.local/share/pypasteserver)
@@ -43,7 +45,7 @@ Options:
 
 Examples:
   ./install.sh
-  ./install.sh --listen 0.0.0.0
+  ./install.sh --listen 0.0.0.0 --relay-url ws://clipboard.home:8001/sync/v1
   ./install.sh --reconfigure --port 9000
 
 Binding to 0.0.0.0 exposes the service to the local network. Paired kclip
@@ -69,6 +71,12 @@ while (($# > 0)); do
         --port)
             require_value "$1" "$#"
             SERVER_PORT_OVERRIDE=$2
+            CONFIG_OVERRIDDEN=1
+            shift 2
+            ;;
+        --relay-url)
+            require_value "$1" "$#"
+            PUBLIC_RELAY_OVERRIDE=$2
             CONFIG_OVERRIDDEN=1
             shift 2
             ;;
@@ -137,6 +145,7 @@ existing_bind=$(read_setting PYP_SERVER_BIND_ADDRESS || true)
 existing_port=$(read_setting PYP_SERVER_PORT || true)
 existing_data=$(read_setting PYP_SERVER_DATA_DIRECTORY || true)
 existing_secret=$(read_setting JWT_SECRET || true)
+existing_public_relay=$(read_setting PYP_SERVER_PUBLIC_RELAY_URL || true)
 
 if [[ -f "$ENVIRONMENT_FILE" && "$CONFIG_OVERRIDDEN" == 1 && "$RECONFIGURE" == 0 ]]; then
     fail "configuration already exists at $ENVIRONMENT_FILE; use --reconfigure to change it"
@@ -147,11 +156,36 @@ SERVER_PORT=${SERVER_PORT_OVERRIDE:-${existing_port:-8001}}
 DATA_DIRECTORY=${DATA_DIRECTORY_OVERRIDE:-${existing_data:-$(default_data_directory)}}
 JWT_SECRET_VALUE=${existing_secret:-$(generate_secret)}
 
+derived_relay_url() {
+    local bind=$1
+    local port=$2
+    case "$bind" in
+        0.0.0.0|'[::]') return 1 ;;
+        *) printf 'ws://%s:%s/sync/v1\n' "$bind" "$port" ;;
+    esac
+}
+
+existing_derived_relay=""
+if [[ -n "$existing_bind" && -n "$existing_port" ]]; then
+    existing_derived_relay=$(derived_relay_url "$existing_bind" "$existing_port" || true)
+fi
+if [[ -n "$PUBLIC_RELAY_OVERRIDE" ]]; then
+    PUBLIC_RELAY_URL=$PUBLIC_RELAY_OVERRIDE
+elif [[ -n "$existing_public_relay" && "$existing_public_relay" != "$existing_derived_relay" ]]; then
+    PUBLIC_RELAY_URL=$existing_public_relay
+else
+    PUBLIC_RELAY_URL=$(derived_relay_url "$SERVER_BIND_ADDRESS" "$SERVER_PORT" || true)
+fi
+
 [[ -n "$SERVER_BIND_ADDRESS" ]] || fail "listen address must not be empty"
 [[ "$SERVER_BIND_ADDRESS" != *[[:space:]/]* ]] || fail "listen address is invalid"
 [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] || fail "port must be an integer"
 ((SERVER_PORT >= 1 && SERVER_PORT <= 65535)) || \
     fail "port must be between 1 and 65535"
+if [[ -n "$PUBLIC_RELAY_URL" ]]; then
+    [[ "$PUBLIC_RELAY_URL" =~ ^wss?://[^/[:space:]]+/sync/v1$ ]] || \
+        fail "relay URL must use ws:// or wss:// and end with /sync/v1"
+fi
 [[ -n "$DATA_DIRECTORY" ]] || fail "data directory must not be empty"
 [[ "$DATA_DIRECTORY" != *$'\n'* && "$DATA_DIRECTORY" != *$'\r'* ]] || \
     fail "data directory must not contain a newline"
@@ -169,6 +203,7 @@ write_configuration() {
         printf '# Managed by ./install.sh. Keep this file private.\n'
         printf 'PYP_SERVER_BIND_ADDRESS=%s\n' "$SERVER_BIND_ADDRESS"
         printf 'PYP_SERVER_PORT=%s\n' "$SERVER_PORT"
+        printf 'PYP_SERVER_PUBLIC_RELAY_URL=%s\n' "$PUBLIC_RELAY_URL"
         printf 'PYP_SERVER_DATA_DIRECTORY=%s\n' "$DATA_DIRECTORY"
         printf 'JWT_SECRET=%s\n' "$JWT_SECRET_VALUE"
         printf 'APP_ENV=development\n'
@@ -224,6 +259,15 @@ fi
 
 printf '\nPyPasteServer configuration is ready.\n'
 printf '  API:   http://%s:%s\n' "$display_host" "$SERVER_PORT"
-printf '  Relay: ws://%s:%s/sync/v1\n' "$display_host" "$SERVER_PORT"
+if [[ -n "$PUBLIC_RELAY_URL" ]]; then
+    printf '  Relay: %s\n' "$PUBLIC_RELAY_URL"
+else
+    printf '  Relay: not configured\n'
+    printf '         Set it with ./install.sh --reconfigure --relay-url ws://HOST:%s/sync/v1\n' "$SERVER_PORT"
+fi
 printf '  Data:  %s\n' "$DATA_DIRECTORY"
-printf '\nCreate an account and pairing code with server_app.admin, then run kclip auth pair.\n'
+if [[ "$START_SERVER" == 1 ]]; then
+    printf '\nNext: run ./admin.sh device add to connect a client device.\n'
+else
+    printf '\nAfter starting the server, run ./admin.sh device add to connect a client device.\n'
+fi

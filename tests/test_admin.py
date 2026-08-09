@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from server_app import admin
 from server_app.db import Base
 from server_app.models import PairedDevice, User
-from server_app.pairing import PairingCode
+from server_app.pairing import DeviceSetupCode
 
 
 def test_local_admin_creates_account_pairs_and_revokes(
@@ -20,48 +21,72 @@ def test_local_admin_creates_account_pairs_and_revokes(
     assert (
         admin.main(
             [
-                "create-account",
+                "account",
+                "create",
                 "--username",
                 "alice",
-                "--email",
-                "alice@example.test",
             ]
         )
         == 0
     )
     assert "Created account alice" in capsys.readouterr().out
 
-    assert admin.main(["list-accounts"]) == 0
+    assert admin.main(["account", "list"]) == 0
     accounts = capsys.readouterr().out
-    assert "USERNAME\tEMAIL\tACTIVE-PAIRINGS\tTOTAL-PAIRINGS" in accounts
-    assert "alice\talice@example.test\t0\t0" in accounts
+    assert "USERNAME\tACTIVE-DEVICES\tTOTAL-DEVICES" in accounts
+    assert "alice\t0\t0" in accounts
+
+    with pytest.raises(SystemExit, match="relay URL"):
+        admin.main(
+            [
+                "device",
+                "add",
+                "--username",
+                "alice",
+                "--device-name",
+                "invalid-device",
+                "--relay-url",
+                "https://clipboard.example.test/sync/v1",
+            ]
+        )
+    with factory() as session:
+        assert session.scalars(select(PairedDevice)).all() == []
 
     assert (
         admin.main(
             [
-                "create-pairing",
+                "device",
+                "add",
                 "--username",
                 "alice",
                 "--device-name",
                 "workstation",
+                "--relay-url",
+                "wss://clipboard.example.test/sync/v1",
             ]
         )
         == 0
     )
     output = capsys.readouterr().out.splitlines()
-    code = PairingCode.parse(output[-1])
+    setup = DeviceSetupCode.parse(output[-1])
+    code = setup.pairing
+    assert setup.relay_url == "wss://clipboard.example.test/sync/v1"
+    assert setup.username == "alice"
+    assert setup.device_name == "workstation"
 
-    assert admin.main(["list-pairings", "--username", "alice"]) == 0
+    assert admin.main(["device", "list", "--username", "alice"]) == 0
     listing = capsys.readouterr().out
     assert code.pairing_id in listing
     assert "active" in listing
     assert "workstation" in listing
     assert code.encode() not in listing
 
-    assert admin.main(["list-accounts"]) == 0
-    assert "alice\talice@example.test\t1\t1" in capsys.readouterr().out
+    assert admin.main(["account", "list"]) == 0
+    assert "alice\t1\t1" in capsys.readouterr().out
 
-    assert admin.main(["revoke-pairing", "--pairing-id", code.pairing_id]) == 0
+    assert (
+        admin.main(["device", "revoke", "--pairing-id", code.pairing_id]) == 0
+    )
     capsys.readouterr()
     with factory() as session:
         user = session.scalar(select(User).where(User.username == "alice"))
@@ -73,6 +98,6 @@ def test_local_admin_creates_account_pairs_and_revokes(
         assert device.revoked_at is not None
         assert device.psk == code.psk
 
-    assert admin.main(["list-accounts"]) == 0
-    assert "alice\talice@example.test\t0\t1" in capsys.readouterr().out
+    assert admin.main(["account", "list"]) == 0
+    assert "alice\t0\t1" in capsys.readouterr().out
     engine.dispose()

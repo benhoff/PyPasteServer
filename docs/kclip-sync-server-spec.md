@@ -71,6 +71,39 @@ sets `X-Kclip-Transport: noise-psk-v1`, and performs
 responder. Both ephemeral keys contribute to fresh directional keys, while the
 `psk0` token authenticates the first handshake message.
 
+#### 5.1.1 Administrative device setup code
+
+The supported administrative handoff is one line with this form:
+
+```text
+kclip-setup-v1:BASE64URL(JSON_UTF8)
+```
+
+`BASE64URL` is unpadded base64url. The decoded JSON object contains exactly:
+
+```json
+{
+  "version": 1,
+  "relay_url": "wss://clipboard.example.test/sync/v1",
+  "username": "alice",
+  "device_name": "office-laptop",
+  "pairing_id": "canonical-lowercase-uuid",
+  "pairing_secret": "unpadded-base64url-32-bytes"
+}
+```
+
+`relay_url` MUST use `ws://` or `wss://`, MUST contain a host, MUST have the
+exact path `/sync/v1`, and MUST NOT contain user information, a query, or a
+fragment. `username` and `device_name` are display context; authorization comes
+only from the pairing credential.
+
+The setup code contains the long-lived device secret and MUST be transferred
+through a private channel, accepted through hidden client input, stored with
+secret-file permissions, and never logged. Administrative tooling displays it
+only when the device is created, but the credential remains valid until the
+device is revoked. The setup code MUST NOT contain the separate account
+synchronization key used for end-to-end payload encryption.
+
 The server MUST reject an unknown or revoked pairing ID before upgrade. After
 upgrade it MUST complete the Noise handshake before accepting any sync
 protocol message. Every application message after the handshake MUST use the
