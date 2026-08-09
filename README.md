@@ -31,9 +31,31 @@ to `127.0.0.1:8001` by default. To accept clients from the local network, use:
 ./install.sh --listen 0.0.0.0
 ```
 
-This exposes an unencrypted development endpoint. Use a TLS reverse proxy and
-`wss://` before exposing the service to the Internet. Run `./install.sh --help`
-for data-directory, port, reconfiguration, build, and startup options.
+Paired clients encrypt and authenticate every application frame over this
+`ws://` endpoint with Noise. Network observers can still see endpoints, timing,
+and message sizes, so use TLS as an additional layer before exposing it to the
+Internet. Run `./install.sh --help` for data-directory, port, reconfiguration,
+build, and startup options.
+
+Create an account and one independent pairing credential per client on the
+server host:
+
+```bash
+docker compose exec app python -m server_app.admin create-account \
+  --username alice --email alice@example.test
+docker compose exec app python -m server_app.admin create-pairing \
+  --username alice --device-name laptop
+```
+
+The second command prints a pairing code once. Transfer it to the client over
+an offline channel, run `kclip auth pair`, and paste it into the hidden prompt.
+List or revoke credentials without exposing their secrets:
+
+```bash
+docker compose exec app python -m server_app.admin list-pairings --username alice
+docker compose exec app python -m server_app.admin revoke-pairing \
+  --pairing-id PAIRING_ID
+```
 
 To run the development stack directly instead:
 
@@ -88,7 +110,8 @@ Environment variables recognised by the server:
 | `RUN_DATABASE_MIGRATIONS_ON_STARTUP` | `true` | Apply Alembic migrations during lifespan startup |
 | `SYNC_ENABLED` | `true` | Enable `/sync/v1` |
 | `SYNC_ALLOW_QUERY_TOKEN` | `false` | Temporarily allow `?token=` authentication for sync-v1 |
-| `SYNC_REQUIRE_TLS` | `false` | Require `wss` or trusted `X-Forwarded-Proto: https` |
+| `SYNC_ALLOW_LEGACY_BEARER` | `false` | Permit the old JWT WebSocket authentication path |
+| `SYNC_REQUIRE_TLS` | `false` | Require TLS when legacy bearer sync is enabled; Noise pairing can use `ws` |
 | `SYNC_MAX_FRAME_BYTES` | `16777216` | Maximum UTF-8 JSON frame size |
 | `SYNC_MAX_EVENT_BYTES` | `11534336` | Maximum decoded ciphertext size |
 | `SYNC_REPLAY_BATCH_SIZE` | `500` | Maximum events loaded per SQL replay query |
@@ -111,8 +134,20 @@ scheme to `wss`; the application does not trust a raw client-supplied
 
 ### kclip sync-v1
 
-Clients connect to `wss://HOST/sync/v1` with an `Authorization: Bearer TOKEN`
-header, then send `hello` before `push` or `checkpoint`. Accepted XChaCha20-
+Paired clients connect to `ws://HOST/sync/v1` with a public pairing ID, perform
+`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`, and then send `hello` before `push` or
+`checkpoint`. Each post-handshake JSON message is split into bounded chunks;
+every chunk is encrypted and authenticated in a binary WebSocket frame. Noise
+transport nonces enforce strict frame order and reject replay. Fresh ephemeral
+keys give every connection new directional transport keys.
+
+The per-device Noise secret authenticates and protects the network session. It
+is separate from kclip's shared end-to-end sync key. The server stores the
+device PSK because a Noise responder must possess it, so the SQL database must
+be protected as credential material; compromising it permits impersonation but
+does not reveal clipboard plaintext without the separate sync key.
+
+Accepted XChaCha20-
 Poly1305 envelopes are base64url-decoded and stored as opaque binary values.
 The server never decrypts them. SQL is the durable source of truth; Redis only
 notifies workers to load newly committed sequences, so reconnect/replay still
@@ -122,6 +157,10 @@ The event log is intentionally unpruned in protocol version 1. Configure a
 quota to reject new uploads explicitly rather than deleting history needed by
 offline clients. Wire and cryptographic contract fixtures shared with the Rust
 repository live in `fixtures/`.
+
+The former bearer-token WebSocket mode is disabled by default. During a TLS-
+protected migration it can be enabled with `SYNC_ALLOW_LEGACY_BEARER=true` and
+`SYNC_REQUIRE_TLS=true`; do not enable it on a plaintext LAN endpoint.
 
 ## Repository layout
 

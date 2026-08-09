@@ -64,6 +64,7 @@ def test_installer_generates_private_config_and_preserves_secret(tmp_path) -> No
     assert initial["PYP_SERVER_PORT"] == "8123"
     assert initial["PYP_SERVER_DATA_DIRECTORY"] == str(data_directory)
     assert len(initial["JWT_SECRET"]) == 64
+    assert initial["SYNC_ALLOW_LEGACY_BEARER"] == "0"
     assert stat.S_IMODE(environment_file.stat().st_mode) == 0o600
     assert stat.S_IMODE(data_directory.stat().st_mode) == 0o700
 

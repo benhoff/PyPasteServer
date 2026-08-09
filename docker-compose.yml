@@ -24,6 +24,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - RUN_DATABASE_MIGRATIONS_ON_STARTUP=0
       - SYNC_REQUIRE_TLS=${SYNC_REQUIRE_TLS:-0}
+      - SYNC_ALLOW_LEGACY_BEARER=${SYNC_ALLOW_LEGACY_BEARER:-0}
     depends_on:
       - redis
     networks:

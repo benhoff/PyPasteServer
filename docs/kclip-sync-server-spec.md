@@ -29,7 +29,7 @@ The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are normative.
 - Decrypting, indexing, previewing, or validating clipboard content.
 - Resolving revision conflicts on the server.
 - Managing the local clipboard, KDE Plasma, or `kclip` slots.
-- Pairing devices or rotating account encryption keys in protocol version 1.
+- Rotating the separate account encryption key in protocol version 1.
 - Exactly-once network delivery. The protocol provides at-least-once delivery
   with idempotent processing.
 - Supporting the experimental `/dev/kclip` kernel interface.
@@ -64,18 +64,28 @@ The server MUST expose the WebSocket endpoint:
 /sync/v1
 ```
 
-Production deployments MUST use TLS (`wss://`). The server MUST authenticate
-the connection using the existing JWT access-token authority. New clients MUST
-send the token in the `Authorization: Bearer <token>` header. A query-string
-token MAY be accepted during a documented migration window but SHOULD NOT be
-the steady-state mechanism because URLs are commonly logged.
+Each device receives an independent random 32-byte secret through an offline
+channel. The client sends the non-secret pairing ID in `X-Kclip-Pairing-ID`,
+sets `X-Kclip-Transport: noise-psk-v1`, and performs
+`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` as initiator. The server is the Noise
+responder. Both ephemeral keys contribute to fresh directional keys, while the
+`psk0` token authenticates the first handshake message.
 
-Authentication MUST complete before the WebSocket is accepted. Every database
-query and fanout operation MUST be scoped to the authenticated user ID.
+The server MUST reject an unknown or revoked pairing ID before upgrade. After
+upgrade it MUST complete the Noise handshake before accepting any sync
+protocol message. Every application message after the handshake MUST use the
+encrypted binary framing below. A client with pairing credentials MUST NOT
+fall back to bearer authentication after a handshake failure.
+
+The legacy JWT path MAY be enabled explicitly during migration, but it MUST use
+TLS and MUST send the token in the `Authorization` header rather than a URL.
+It is disabled by default. Pairing credentials are account-scoped and revoking
+one MUST NOT revoke any other device. Every database query and fanout operation
+MUST be scoped to the authenticated user ID.
 
 ### 5.2 WebSocket messages
 
-Protocol messages are UTF-8 JSON objects. Unknown object fields MUST be ignored
+Protocol messages are UTF-8 JSON objects inside the Noise transport. Unknown object fields MUST be ignored
 when doing so is safe. Unknown message types or unsupported protocol versions
 MUST produce a structured error.
 
@@ -90,6 +100,19 @@ Implementations MUST enforce configurable limits for:
 The initial maximum encrypted event size SHOULD accommodate the `kclipd`
 content limit plus envelope and base64 overhead. The client default is 10 MiB
 of plaintext, so a 16 MiB WebSocket limit is a reasonable initial minimum.
+
+### 5.3 Encrypted binary framing
+
+Noise ciphertext is limited to 65,535 bytes. A JSON message is therefore split
+into chunks of at most 65,518 bytes. Each encrypted plaintext chunk begins with
+one byte: `0x00` means more chunks follow and `0x01` marks the final chunk. One
+Noise ciphertext is carried in each binary WebSocket data frame. Receivers
+MUST enforce the configured logical-message limit while reassembling chunks.
+
+Noise transport nonces are implicit counters. Either peer MUST terminate the
+session when authentication fails; replayed, missing, or reordered frames must
+never be retried under a different counter. WebSocket ping, pong, and close are
+transport control frames and carry no sync data.
 
 ## 6. Protocol
 

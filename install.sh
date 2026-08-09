@@ -46,8 +46,9 @@ Examples:
   ./install.sh --listen 0.0.0.0
   ./install.sh --reconfigure --port 9000
 
-Binding to 0.0.0.0 exposes the development HTTP/WebSocket service to the local
-network. Use a TLS reverse proxy and wss:// for an Internet-facing deployment.
+Binding to 0.0.0.0 exposes the service to the local network. Paired kclip
+clients protect application frames with Noise. Use TLS as well before exposing
+the service to the Internet.
 EOF
 }
 
@@ -172,6 +173,7 @@ write_configuration() {
         printf 'JWT_SECRET=%s\n' "$JWT_SECRET_VALUE"
         printf 'APP_ENV=development\n'
         printf 'SYNC_REQUIRE_TLS=0\n'
+        printf 'SYNC_ALLOW_LEGACY_BEARER=0\n'
     } >"$temporary_file"
     chmod 600 "$temporary_file"
     mv "$temporary_file" "$ENVIRONMENT_FILE"
@@ -224,4 +226,4 @@ printf '\nPyPasteServer configuration is ready.\n'
 printf '  API:   http://%s:%s\n' "$display_host" "$SERVER_PORT"
 printf '  Relay: ws://%s:%s/sync/v1\n' "$display_host" "$SERVER_PORT"
 printf '  Data:  %s\n' "$DATA_DIRECTORY"
-printf '\nConfigure kclip with that relay URL and allow_insecure_transport=true.\n'
+printf '\nCreate an account and pairing code with server_app.admin, then run kclip auth pair.\n'
